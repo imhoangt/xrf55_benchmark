@@ -1,0 +1,183 @@
+# APWMamba — Amplitude-Phase Wavelet Mamba
+# WiFi CSI Human Activity Recognition
+#
+# IMPORTANT: This file is the single source of truth for the entire configuration.
+# src/training/config.py loads this file; do not hardcode parameters elsewhere.
+
+model:
+  name: APWMamba
+  num_classes: 11
+
+paths:
+  data_processed: dataset/xrf55/processed
+  runs_dir: outputs/runs
+  current_run: apwmamba                     # outputs/runs/apwmamba/ (parallel to tf_mamba_* baselines)
+  kaggle_code_dataset: 4_baselines_code
+  kaggle_processed_dataset: xrf55_processed_dataset
+  visualization_sample: visualization_sample_running_vol01_rep11.npz
+
+input:
+  T_raw: 1000
+  fs: 200
+  duration_s: 5.0
+  F: 30
+  M: 3
+  A: 3
+
+dataset:
+  source: XRF55 scene_01
+  action_id_to_label: {31: 0, 32: 1, 33: 2, 34: 3, 35: 4, 36: 5, 37: 6, 38: 7, 39: 8, 40: 9, 41: 10}
+  num_volunteers: 30
+  num_reps: 20
+  num_rx_devices: 3
+
+split:
+  # noval protocol — rep-based split, all 30 subjects
+  train_reps: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  val_reps:   [13, 14]
+  test_reps:  [15, 16, 17, 18, 19, 20]
+  train_samples: 3960    # 30×11×12
+  val_samples:   660     # 30×11×2
+  test_samples:  1980    # 30×11×6
+  # loso protocol — group-rotation subject split (per fold)
+  # test=G[i], val=G[(i+1)%5], train=remaining 3 groups (18 subjects × all 20 reps)
+  loso_train_samples: 3960   # 18×11×20
+  loso_val_samples:   1320   # 6×11×20
+  loso_test_samples:  1320   # 6×11×20
+
+preprocessing:
+  amplitude:
+    hampel: {window: 11, n_sigma: 3.0, mad_eps: 1.0e-6, pad_mode: reflect}
+    lpf: {cutoff_hz: 20.0, order: 4, method: sosfiltfilt}
+  phase:
+    method: conjugate_diff
+    ref_antenna: 0
+    n_streams: 6
+    unwrap_axis: subcarrier
+    detrend: {type: lsq_linear, axis: subcarrier}   # LSQ per-packet slope removal (SFO residual)
+  dwt:
+    level: 1
+    wavelet: db4
+    mode: periodization
+    drop_hh: true
+    T2: 500
+    F2: 15
+  normalization:
+    scope: per_channel_per_subcarrier_after_dwt  # z-score per (channel, subcarrier), fit on train only
+    amp_channels: 27              # 3 subbands × 9 amp channels
+    phase_channels: 18            # 3 subbands × 6 phase channels
+    fit_on: train_reps_only
+
+architecture:
+  # M1: Subband-Aware CNN Encoder
+  cnn_encoder:
+    n_per_subband_amp:   9   # 3 RX × 3 TX → 9 channels/subband
+    n_per_subband_phase: 6   # 3 RX × 2 TX-diff → 6 channels/subband
+    d_subband: 32
+    d_model:   128
+    n_tf_blocks: 3           # 3 TFBlock residuals per subband (dilations [1,3,9])
+    stem_kernels: [[7,5], [3,7], [7,3]]   # LL (smooth), HL (bursty-t), LH (freq-rich)
+    subband_stem_norm: GroupNorm(8, 32)   # 8 groups × 4 ch (per Wu&He 2018: >=8 ch/group)
+    joint_stem_norm:   GroupNorm(8, 128)  # 8 groups × 16 ch
+    tf_block_norm:     GroupNorm(8, 128)  # 8 groups × 16 ch
+  # M2: Cross-Modal Bilateral Gated Fusion (full-res, no bottleneck projection)
+  fusion:
+    type: bilateral_full_res_gate
+    gate_in_channels:  256   # cat[F_amp, F_phase] = 2*d_model
+    gate_out_channels: 128   # G_a and G_p shape (independent sigmoid gates)
+    output_norm: GroupNorm(8, 128)
+  # M3: Frequency Statistics-Gated Pooling (SE recalibration + local attention)
+  freq_stat_pool:
+    op:       se_recal_plus_local_attn
+    d_model:  128
+    reduction: 8             # SE bottleneck: r = d_model // reduction = 16
+    d_out:    128
+    score_bias: true         # all Linears (stats_fc1/fc2, local_score) have bias=True
+  # M4: Bidirectional Mamba Stack (internal RMSNorm per layer + final RMSNorm)
+  bi_mamba:
+    n_layers:  2             # 2 bidirectional Mamba layers
+    d_model:   128
+    d_state:   32
+    expand:    2
+    # SimplifiedBiMambaGate: a = sigmoid(Linear(2D→1) + alpha*t_norm + beta)
+    #   y = a * y_fwd + (1-a) * y_bwd  (convex combination, magnitude preserved)
+    # content_proj + pos_alpha + pos_beta zero-init → a = 0.5 at start.
+    bidirectional_strategy: simplified_content_pos_gate
+    layer_norm: RMSNorm      # per-layer norm before fwd/bwd
+  final_norm:
+    type:    RMSNorm         # after BiMamba stack, before pooling
+    d_model: 128
+  # M5: Attentive Statistical Pooling — ECAPA-TDNN style channel-dependent attention
+  attentive_stat_pool:
+    d_model:   128
+    output_dim: 256          # 2*d_model: cat[mean, std]
+    score: Sequential(Linear(128,32), Tanh, Linear(32,128))  # per-channel temporal weights
+  # M6: Classifier
+  classifier:
+    d_in:       256          # attentive_stat_pool output
+    hidden:     128
+    dropout:    0.2
+    dropout_in: 0.1          # applied before fc1 on 256-dim embedding
+
+drop_path:
+  cnn_rates:    [0.00, 0.05, 0.10]   # 3 TFBlocks per branch
+  mamba_rates:  [0.00, 0.05]         # 2 BiMamba layers
+
+init:
+  conv:                    kaiming_normal_fan_out_linear  # nonlinearity='linear' (gain=1) for GELU
+  linear:                  trunc_normal_0.02              # std=0.02 (transformer standard)
+  groupnorm:               ones_zeros                     # weight=1, bias=0
+  layernorm:               ones_zeros                     # weight=1, bias=0
+  rmsnorm:                 ones                           # weight=1 (no bias)
+  fusion_gates:            zeros                          # gate_a/gate_p → G=0.5 at init
+  bimamba_simplified_gate: zeros                          # content_proj → gate=0.5 at init
+  mamba_internals:         keep_default                   # marked via _no_reinit flag
+
+training:
+  seeds:         [4, 8, 17]         # 3 seeds; single-seed runs use seeds[0]=4
+  speed_mode:    kaggle_adaptive_single_gpu
+  optimizer:     AdamW
+  base_lr:       5.0e-4
+  lr_scaling:    sqrt_from_batch16    # cap removed; floor_ratio=0.10 via LambdaLR
+  lr_cap:        1.0e-3
+  betas:         [0.9, 0.95]
+  eps:           1.0e-8
+  weight_decay:  1.0e-4
+  param_groups:
+    no_decay_for: [biases, norms, A_log, D]
+  batch_size:           32
+  base_batch_size:      16           # reference for sqrt LR scaling
+  max_epochs:           100          # fixed budget; cosine LR floor = base_lr*0.10 ≈ 7e-5
+  warmup_epochs:        5
+  early_stopping:
+    patience: 10        # stop if val_acc does not improve for 10 consecutive epochs
+  scheduler:            cosine_with_warmup
+  label_smoothing:      0.10
+  grad_clip_norm:       1.0
+  precision:            FP32
+
+infrastructure:
+  num_workers:          4
+  pin_memory:           true
+  persistent_workers:   true
+  prefetch_factor:      2
+  cudnn_deterministic:  false
+  cudnn_benchmark:      true
+
+checkpointing:
+  rolling_last:            true
+  final_model_from:        checkpoint.pt
+
+logging:
+  log_file:             true
+  log_stdout:           true
+  csv:                  true
+  flush_after_each_epoch: true
+  csv_extra_columns:    []
+
+visualization:
+  sample:
+    vol_id:      1
+    action_id:   35
+    rep_id:      11
+    source_file: visualization_sample_running_vol01_rep11.npz
