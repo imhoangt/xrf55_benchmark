@@ -1,4 +1,4 @@
-"""TF-Mamba — paper-faithful implementation (final version4).
+"""TF-Mamba — paper-faithful implementation.
 
 Reference
 ─────────
@@ -10,9 +10,9 @@ Input convention (caller's responsibility)
 ──────────────────────────────────────────
 Both XH and XV are delivered in the same orientation:
 
-    XH, XV  ∈  R^{B × L × M}    where  L = T/2 = 500,  M = N/2 = 135
+    XH, XV  ∈  R^{B × L × M}    where  L = T/2,  M = N/2
 
-HUST-HAR example (S ∈ R^{270×1000} after 200-Hz downsampling):
+HUST-HAR example (S ∈ R^{270×1000}):
     After 2-D Haar DWT: XH_raw, XV_raw ∈ R^{135×500}
     Caller transposes BOTH:
         XH = XH_raw.permute(0,2,1)   →  (B, 500, 135)
@@ -48,16 +48,6 @@ Differences from original model.py
     Paper: "higher dimensional space" refers to the raw feature space M,
     not d_model. Optimal D′ = D = 64 confirmed by Table I.
     Linear(d_model, d_model) is correct; d_proj parameter kept for flexibility.
-
-[Fix 4] Frequency-Mamba scan direction (Fig. 7)
-    OLD: stream_F used TFMambaStream — scanned along L=500, same as stream_T.
-         Both streams were identical; "freq" was only in the input subband.
-    NEW: stream_F uses TFMambaStreamFreq — after EmbeddingLayer produces
-         (B, L, D), transposes to (B, D, L), Mamba scans D=64 steps (each
-         carrying L=500 features), then transposes back to (B, L, D).
-         This matches Fig. 7(c): vertical arrows on X_V mean scan along the
-         feature/embedding axis, not the temporal axis.
-         Consequence: stream_F Mamba uses d_model=max_len=L, not d_model=D.
 """
 
 import math
@@ -114,9 +104,9 @@ class EmbeddingLayer(nn.Module):
 
 
 class TFMambaStream(nn.Module):
-    """Time-Mamba stream: EmbeddingLayer + P stacked pre-norm Mamba blocks.
+    """Single Mamba stream: EmbeddingLayer + P stacked pre-norm Mamba blocks.
 
-    Scans along the temporal axis L (Fig. 7b — horizontal arrows on X_H).
+    Scans along the sequence axis L (temporal dimension).
     Mamba d_model = D (embed dim); sequence length = L.
 
     Each block implements Eq. 11–14 (Fig. 6):
@@ -172,63 +162,6 @@ class TFMambaStream(nn.Module):
         return x
 
 
-class TFMambaStreamFreq(nn.Module):
-    """Frequency-Mamba stream: EmbeddingLayer + P stacked pre-norm Mamba blocks.
-
-    Scans along the embedding/feature axis D (Fig. 7c — vertical arrows on X_V).
-    After EmbeddingLayer maps (B, L, M) → (B, L, D), transposes to (B, D, L)
-    so Mamba scans D=d_model steps, each carrying L features.
-    Transposes back to (B, L, D) before returning.
-
-    Mamba d_model = max_len = L (NOT D); LayerNorm = LayerNorm(max_len).
-
-    Shape contract:
-        Input  (B, L, M)  →  EmbeddingLayer  →  (B, L, D)
-        transpose(1, 2)   →  (B, D, L)
-        P × Mamba block   →  (B, D, L)         [Mamba d_model=L, seq_len=D]
-        transpose(1, 2)   →  (B, L, D)         ← same shape as TFMambaStream
-    """
-
-    def __init__(
-        self,
-        num_features: int,
-        d_model:      int,
-        d_state:      int = 16,
-        d_conv:       int = 4,
-        expand:       int = 2,
-        num_layers:   int = 3,
-        max_len:      int = 500,
-    ):
-        super().__init__()
-        self.emb    = EmbeddingLayer(num_features, d_model, max_len)
-        # After transpose: last dim = max_len (= L); normalise along L.
-        self.norms  = nn.ModuleList(
-            [nn.LayerNorm(max_len) for _ in range(num_layers)]
-        )
-        # Mamba scans D=d_model steps; each step has max_len features.
-        self.mambas = nn.ModuleList(
-            [
-                Mamba(d_model=max_len, d_state=d_state,
-                      d_conv=d_conv, expand=expand)
-                for _ in range(num_layers)
-            ]
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, L, num_features)
-        Returns:
-            (B, L, d_model)  — same shape contract as TFMambaStream.
-        """
-        x = self.emb(x)              # (B, L, D)
-        x = x.transpose(1, 2)        # (B, D, L) — scan along D
-        for norm, mamba in zip(self.norms, self.mambas):
-            x = x + mamba(norm(x))   # pre-norm residual, Eq. 14
-        x = x.transpose(1, 2)        # (B, L, D)
-        return x
-
-
 class AdaptiveFusion(nn.Module):
     """Soft-weighted adaptive fusion — Sec. IV-E, Eq. 15.
 
@@ -268,22 +201,21 @@ class AdaptiveFusion(nn.Module):
 class TFMamba(nn.Module):
     """TF-Mamba dual-stream SSM for Wi-Fi CSI-based HAR — Fig. 5, Sec. IV.
 
-    Both streams receive inputs of identical shape (B, L, M) and the full
-    paper-faithful sequence-level flow is used throughout.
+    Both streams receive inputs of identical shape (B, L, M) and scan along L.
+    The two streams differ only in their input subband: XH (time-domain Haar
+    horizontal detail) vs XV (freq-domain Haar vertical detail).
 
     Args
     ────
     num_features : feature dim M shared by both XH and XV inputs
                    (= N/2 = 135 for HUST-HAR after DWT + transpose)
     d_model      : hidden dimension D = D′ = 64                  (default 64)
-                   stream_T Mamba d_model = D; stream_F Mamba d_model = max_len.
     num_layers   : Mamba layers per stream P                      (default 3)
     num_classes  : number of activity classes c                   (default 6)
     d_state      : Mamba SSM state dimension                      (default 16)
     d_conv       : Mamba depthwise-conv kernel size               (default 4)
     expand       : Mamba inner-dimension expansion factor         (default 2)
     max_len      : positional-encoding max sequence length L      (default 500)
-                   Also serves as Mamba d_model for stream_F (freq-domain scan).
     """
 
     def __init__(
@@ -299,8 +231,7 @@ class TFMamba(nn.Module):
     ):
         super().__init__()
 
-        # Time-Mamba stream — scans DWT horizontal-detail subband XH
-        self.stream_T = TFMambaStream(
+        shared_kwargs = dict(
             num_features=num_features,
             d_model=d_model,
             d_state=d_state,
@@ -310,16 +241,11 @@ class TFMamba(nn.Module):
             max_len=max_len,
         )
 
-        # Freq-Mamba stream — scans along D (embedding dim) after transpose [Fix 4]
-        self.stream_F = TFMambaStreamFreq(
-            num_features=num_features,
-            d_model=d_model,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=expand,
-            num_layers=num_layers,
-            max_len=max_len,
-        )
+        # Time-Mamba stream — XH (horizontal-detail DWT subband)
+        self.stream_T = TFMambaStream(**shared_kwargs)
+
+        # Freq-Mamba stream — XV (vertical-detail DWT subband)
+        self.stream_F = TFMambaStream(**shared_kwargs)
 
         # Adaptive fusion  [Eq. 15]
         self.fusion = AdaptiveFusion(d_model)
@@ -349,15 +275,12 @@ class TFMamba(nn.Module):
         S_F = self.stream_F(XV)              # (B, L, d_model)
 
         # ── Step 2: sequence-level adaptive fusion [Eq. 15] ──────────────────
-        # L_T == L_F == L  →  weights α_T, α_F computed from full (B,L,D) context
         S2 = self.fusion(S_T, S_F)           # (B, L, d_model)
 
         # ── Step 3: linear projection + tanh ─────────────────────────────────
         S3 = torch.tanh(self.proj_s3(S2))    # (B, L, d_model)
 
         # ── Step 4: Global Average Pooling ────────────────────────────────────
-        # Reduces (B, L, D) → (B, D) before classifier.
-        # Placed AFTER proj_s3 as in Fig. 5 (S3 → Classifier → Ŝ).
         S3 = S3.mean(dim=1)                  # (B, d_model)
 
         # ── Step 5: classifier ────────────────────────────────────────────────

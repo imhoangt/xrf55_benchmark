@@ -1,6 +1,10 @@
 dataset/
 .claude/
 outputs/
+__pycache__/
+*.py[cod]
+*.pth
+*.pt
 
 
 # =========================
