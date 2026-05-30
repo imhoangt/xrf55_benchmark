@@ -1,7 +1,16 @@
-"""ResNet18 1D — adapted from XRF55 official repo for HAR-CSI baseline.
+"""ResNet18 1D — matches XRF55 official repo (aiotgroup/XRF55-repo).
 
-Input:  (B, inchannel, T)
+Input:  (B, inchannel, T)   e.g. (B, 270, 1000) for WiFi
 Output: (B, num_classes)
+
+Temporal dims for T=1000:
+  conv1 stride=2  → 500
+  maxpool stride=2 → 250
+  layer1 stride=1  → 250
+  layer2 stride=2  → 125
+  layer3 stride=2  → 63
+  layer4 stride=2  → 32
+  AdaptiveAvgPool  → 1
 """
 import torch.nn as nn
 
@@ -41,27 +50,17 @@ class ResNet(nn.Module):
     def __init__(self, block, layers, inchannel=270, activity_num=11):
         super().__init__()
         self.inplanes = 128
-        self.conv1    = nn.Conv1d(inchannel, 128, kernel_size=7, stride=2, padding=3, bias=False)
-        self.conv2    = nn.Conv1d(128,       128, kernel_size=7, stride=1, padding=3, bias=False)
-        self.conv3    = nn.Conv1d(128,       128, kernel_size=7, stride=1, padding=3, bias=False)
+        self.conv1    = nn.Conv1d(inchannel, 128, kernel_size=7, stride=2,
+                                  padding=3, bias=False, groups=1)
         self.bn1      = nn.BatchNorm1d(128)
-        self.bn2      = nn.BatchNorm1d(128)
-        self.bn3      = nn.BatchNorm1d(128)
         self.relu     = nn.ReLU(inplace=True)
         self.maxpool  = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
-        self.layer1   = self._make_layer(block, 64,  layers[0])
+        self.layer1   = self._make_layer(block, 128, layers[0], stride=1)
         self.layer2   = self._make_layer(block, 128, layers[1], stride=2)
         self.layer3   = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4   = self._make_layer(block, 512, layers[3], stride=2)
         self.avgpool  = nn.AdaptiveAvgPool1d(1)
         self.fc       = nn.Linear(512 * block.expansion, activity_num)
-
-        for m in self.modules():
-            if isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias,   0)
 
     def _make_layer(self, block, planes, blocks, stride=1, group=1):
         downsample = None
@@ -78,8 +77,6 @@ class ResNet(nn.Module):
 
     def forward(self, x):
         x = self.relu(self.bn1(self.conv1(x)))
-        x = self.relu(self.bn2(self.conv2(x)))
-        x = self.relu(self.bn3(self.conv3(x)))
         x = self.maxpool(x)
         x = self.layer1(x)
         x = self.layer2(x)

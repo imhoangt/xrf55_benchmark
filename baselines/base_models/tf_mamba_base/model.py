@@ -53,7 +53,13 @@ Differences from original model.py
 import math
 import torch
 import torch.nn as nn
-from mamba_ssm import Mamba
+try:
+    from mamba_ssm import Mamba
+except ImportError as _e:
+    raise ImportError(
+        'mamba_ssm not installed. Run: pip install mamba-ssm\n'
+        'Requires CUDA + compatible GPU.'
+    ) from _e
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,11 +1,39 @@
+# =========================
+# 1. Dataset & large outputs
+# =========================
 dataset/
-.claude/
 outputs/
+_plot_test/
+
+# =========================
+# 2. Python artifacts
+# =========================
 __pycache__/
 *.py[cod]
-*.pth
-*.pt
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+.env
+.env.*
 
+# =========================
+# 3. ML experiment files
+# =========================
+*.pt
+*.pth
+*.ckpt
+wandb/
+mlruns/
+lightning_logs/
+runs/
+*.log
 
 # =========================
 # 4. Jupyter Notebook & IDE
@@ -15,7 +43,8 @@ __pycache__/
 .idea/
 
 # =========================
-# 5. File hệ thống (OS)
+# 5. Claude & OS files
 # =========================
+.claude/
 .DS_Store
 Thumbs.db

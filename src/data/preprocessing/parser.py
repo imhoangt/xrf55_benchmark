@@ -1,4 +1,9 @@
-import csiread
+try:
+    import csiread
+    _CSIREAD_OK = True
+except ImportError:
+    _CSIREAD_OK = False
+
 import numpy as np
 import scipy.io
 from pathlib import Path
@@ -40,6 +45,8 @@ def parse_xrf55_dat(fpath):
     """Parse one .dat file with antenna permutation correction.
     Returns: csi_phys (1000, 30, 3) complex128
     """
+    if not _CSIREAD_OK:
+        raise ImportError('csiread not installed. Run: pip install csiread')
     cd = csiread.Intel(str(fpath), nrxnum=3, ntxnum=1, pl_size=0, if_report=False)
     cd.read()
 
