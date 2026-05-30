@@ -162,6 +162,20 @@ def _save_zip(output_dir: Path, model_name: str, seeds) -> Path:
     return zip_path
 
 
+def _save_model_zip(output_dir: Path, model_name: str, seeds) -> Path:
+    """Pack last_model.pt + best_model.pt for all seeds."""
+    folder   = f'xrf55_bench_{model_name}'
+    zip_path = output_dir / 'model.zip'
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
+        for seed in seeds:
+            sd = output_dir / 'seeds' / f'{seed:03d}'
+            for fname in ['last_model.pt', 'best_model.pt']:
+                p = sd / fname
+                if p.exists():
+                    zf.write(p, f'{folder}/seeds/{seed:03d}/{fname}')
+    return zip_path
+
+
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
 def build_metrics(model_name: str, bench_dir, cfg,

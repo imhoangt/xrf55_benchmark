@@ -7,7 +7,7 @@ Split: train=reps 1-14 (4620), test=reps 15-20 (1980). No val.
 
 Protocols
 ---------
-  plain     AdamW lr=1e-3, no scheduler,  40ep  (tf_mamba paper)
+  plain     AdamW lr=1e-4, no scheduler,  40ep  (tf_mamba paper)
   xrf55     Adam  lr=1e-3, MultiStepLR,  200ep  (XRF55 paper, no grad clip)
   apwmamba  AdamW lr=4e-4, warmup+cosine, 120ep (APWMamba paper)
 
@@ -27,6 +27,7 @@ Output: output_dir/
     seeds/{seed:03d}/       (training_log.csv, last_model.pt, best_model.pt,
                              test_predictions.npz)
     results_summary.zip     (metrics + plots + logs + predictions; no model weights)
+    model.zip               (last_model.pt + best_model.pt for all seeds)
 """
 import csv
 import math
@@ -61,7 +62,7 @@ from xrf55_bench.config    import TrainCfg, TrainCfg_for_protocol, _PROTOCOL_DEF
 from xrf55_bench.dataset   import build_loaders, load_stats
 from xrf55_bench.reporting import (
     _plot_training_curve, _plot_confusion_matrix, _plot_seed_comparison,
-    _save_zip, build_metrics, save_metrics,
+    _save_zip, _save_model_zip, build_metrics, save_metrics,
 )
 from src.training.amp_utils   import torch_load_checkpoint
 from src.training.train_utils import configure_speed_mode, set_seed
@@ -411,9 +412,11 @@ def main(model_name: str, output_dir,
     save_metrics(output_dir, metrics)
 
     # ── ZIP ───────────────────────────────────────────────────────────────────
-    zip_path = _save_zip(output_dir, model_name, cfg.seeds)
-    print(f'\nSaved : {output_dir}')
-    print(f'ZIP   : {zip_path}')
+    zip_path   = _save_zip(output_dir, model_name, cfg.seeds)
+    model_zip  = _save_model_zip(output_dir, model_name, cfg.seeds)
+    print(f'\nSaved     : {output_dir}')
+    print(f'ZIP       : {zip_path}')
+    print(f'Model ZIP : {model_zip}')
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
