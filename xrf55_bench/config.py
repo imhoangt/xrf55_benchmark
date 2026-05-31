@@ -1,17 +1,18 @@
 """Training configuration and protocol presets for the XRF55 benchmark."""
+import copy
 from dataclasses import dataclass
 from typing import Optional
 
 
 @dataclass
 class TrainCfg:
-    protocol:         str            = 'plain'   # 'plain' | 'xrf55' | 'apwmamba'
+    protocol:         str            = '01'    # '01' | '02' | '03'
 
     # Hyperparameters
     lr:               float          = 1e-3
     batch_size:       int            = 32
     num_epochs:       int            = 40
-    grad_clip:        Optional[float]= 1.0       # None = no clipping (xrf55)
+    grad_clip:        Optional[float]= 1.0     # None = no clipping (protocol 02)
     weight_decay:     float          = 0.0
 
     # Optimizer: 'adamw' | 'adam' | 'sgd'
@@ -34,13 +35,13 @@ class TrainCfg:
 
 
 _PROTOCOL_DEFAULTS = {
-    'plain': dict(
+    '01': dict(                         # plain — tf_mamba paper
         optimizer='adamw', lr=1e-3,  batch_size=32, num_epochs=40,
         betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0,
         scheduler=None, warmup_epochs=0,
         grad_clip=1.0, criterion='ce', label_smoothing=0.0,
     ),
-    'xrf55': dict(
+    '02': dict(                         # xrf55 paper
         optimizer='adam',  lr=1e-3,  batch_size=64, num_epochs=200,
         betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0,
         scheduler='multistep',
@@ -48,7 +49,7 @@ _PROTOCOL_DEFAULTS = {
         warmup_epochs=0,
         grad_clip=None, criterion='ce', label_smoothing=0.0,
     ),
-    'apwmamba': dict(
+    '03': dict(                         # apwmamba paper
         optimizer='adamw', lr=4e-4,  batch_size=32, num_epochs=120,
         betas=(0.9, 0.95), eps=1e-8, weight_decay=1e-4,
         scheduler='warmup_cosine', warmup_epochs=5, floor_lr=1e-5,
@@ -62,6 +63,6 @@ def TrainCfg_for_protocol(protocol: str, **overrides) -> TrainCfg:
     if protocol not in _PROTOCOL_DEFAULTS:
         raise ValueError(
             f"Unknown protocol {protocol!r}. Choose from: {list(_PROTOCOL_DEFAULTS)}")
-    defaults = _PROTOCOL_DEFAULTS[protocol].copy()
+    defaults = copy.deepcopy(_PROTOCOL_DEFAULTS[protocol])
     defaults.update(overrides)
     return TrainCfg(protocol=protocol, **defaults)

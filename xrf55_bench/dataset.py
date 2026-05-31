@@ -95,7 +95,7 @@ class PreprocResNetDataset(Dataset):
 
     def __init__(self, bench_dir: Path, split: str, stats: dict):
         bench_dir = Path(bench_dir)
-        self.X   = np.load(bench_dir / 'resnet' / f'X_{split}.npy')
+        self.X   = np.load(bench_dir / 'resnet' / f'X_{split}.npy', mmap_mode='r')
         self.y   = np.load(bench_dir / f'y_{split}.npy')
         self.mu  = np.array(stats['resnet']['mean'], dtype=np.float32)  # (270,)
         self.sig = np.array(stats['resnet']['std'],  dtype=np.float32)  # (270,)
@@ -112,8 +112,8 @@ class PreprocTFMambaDataset(Dataset):
 
     def __init__(self, bench_dir: Path, split: str, stats: dict):
         bench_dir = Path(bench_dir)
-        self.XH = np.load(bench_dir / 'tfmamba' / f'X_{split}_xh.npy')  # (N, 500, 135)
-        self.XV = np.load(bench_dir / 'tfmamba' / f'X_{split}_xv.npy')  # (N, 135, 500)
+        self.XH = np.load(bench_dir / 'tfmamba' / f'X_{split}_xh.npy', mmap_mode='r')  # (N, 500, 135)
+        self.XV = np.load(bench_dir / 'tfmamba' / f'X_{split}_xv.npy', mmap_mode='r')  # (N, 135, 500)
         self.y  = np.load(bench_dir / f'y_{split}.npy')
         s = stats['tfmamba']
         self.xh_mean = np.array(s['xh_mean'], dtype=np.float32)  # (135,)
@@ -135,7 +135,7 @@ class PreprocWavMambaDataset(Dataset):
 
     def __init__(self, bench_dir: Path, split: str, stats: dict):
         bench_dir = Path(bench_dir)
-        self.X   = np.load(bench_dir / 'wavmamba' / f'X_{split}.npy')
+        self.X   = np.load(bench_dir / 'wavmamba' / f'X_{split}.npy', mmap_mode='r')
         self.y   = np.load(bench_dir / f'y_{split}.npy')
         s = stats['wavmamba']
         self.mu  = np.array(s['mean'], dtype=np.float32)  # (27,)
@@ -245,6 +245,11 @@ def _resolve_source(model_name: str, bench_dir, amp4d_dir, source: str) -> str:
     if source == 'preproc':
         if bench_dir is None:
             raise ValueError('bench_dir required for source="preproc"')
+        sentinel = Path(bench_dir) / _PREPROC_SENTINEL[model_name]
+        if not sentinel.exists():
+            raise ValueError(
+                f'source="preproc": array not found at {sentinel}\n'
+                'Run the preprocessing scripts first.')
         return 'preproc'
     if source == 'raw':
         if amp4d_dir is None:
@@ -292,5 +297,5 @@ def build_loaders(model_name: str, stats: dict,
     train_ds = DS(root, 'train', stats)
     test_ds  = DS(root, 'test',  stats)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  **kw)
-    test_loader  = DataLoader(test_ds,  batch_size=64,         shuffle=False, **kw)
+    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, **kw)
     return train_loader, test_loader

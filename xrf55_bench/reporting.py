@@ -3,6 +3,7 @@
 Functions are standalone and can be called independently of trainer.py,
 e.g. to regenerate plots from saved training_log.csv without re-running training.
 """
+import dataclasses
 import json
 import zipfile
 from pathlib import Path
@@ -185,21 +186,8 @@ def build_metrics(model_name: str, bench_dir, cfg,
     cfg: TrainCfg instance (duck-typed to avoid circular imports).
     """
     cfg_dict = {
-        'protocol':        cfg.protocol,
-        'optimizer':       cfg.optimizer,
-        'betas':           list(cfg.betas),
-        'eps':             cfg.eps,
-        'lr':              cfg.lr,
-        'batch_size':      cfg.batch_size,
-        'num_epochs':      cfg.num_epochs,
-        'weight_decay':    cfg.weight_decay,
-        'grad_clip':       cfg.grad_clip,
-        'scheduler':         cfg.scheduler,
-        'scheduler_kwargs':  cfg.scheduler_kwargs,
-        'warmup_epochs':     cfg.warmup_epochs,
-        'criterion':         cfg.criterion,
-        'label_smoothing': cfg.label_smoothing,
-        'seeds':           list(cfg.seeds),
+        k: list(v) if isinstance(v, tuple) else v
+        for k, v in dataclasses.asdict(cfg).items()
     }
     return {
         'model':     f'xrf55_bench_{model_name}',

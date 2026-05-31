@@ -7,9 +7,9 @@ Split: train=reps 1-14 (4620), test=reps 15-20 (1980). No val.
 
 Protocols
 ---------
-  plain     AdamW lr=1e-4, no scheduler,  40ep  (tf_mamba paper)
-  xrf55     Adam  lr=1e-3, MultiStepLR,  200ep  (XRF55 paper, no grad clip)
-  apwmamba  AdamW lr=4e-4, warmup+cosine, 120ep (APWMamba paper)
+  01  AdamW lr=1e-3, no scheduler,   40ep  (tf_mamba paper)
+  02  Adam  lr=1e-3, MultiStepLR,   200ep  (XRF55 paper, no grad clip)
+  03  AdamW lr=4e-4, warmup+cosine, 120ep  (APWMamba paper)
 
 All protocols: no early stop, FP32.
   last_model.pt  — epoch cuối (model chính, dùng cho final eval)
@@ -17,9 +17,9 @@ All protocols: no early stop, FP32.
 
 Usage:
     cd har_csi
-    python xrf55_bench/trainer.py --model resnet --protocol plain
-    python xrf55_bench/trainer.py --model resnet --protocol xrf55
-    python xrf55_bench/trainer.py --model wavmamba --protocol apwmamba --seeds 4 8 17 42
+    python xrf55_bench/trainer.py --model resnet --protocol 01
+    python xrf55_bench/trainer.py --model resnet --protocol 02
+    python xrf55_bench/trainer.py --model wavmamba --protocol 03 --seeds 4 8 17 42
 
 Output: output_dir/
     metrics.json            (config + per_seed + summary)
@@ -111,7 +111,7 @@ _NO_DECAY_KEYS = {'bias', 'A_log', 'D', 'pos'}
 
 
 def _make_optimizer(model: nn.Module, cfg: TrainCfg):
-    if cfg.protocol == 'apwmamba':
+    if cfg.protocol == '03':
         # Selective weight decay — exclude bias/norm/A_log/D/pos
         decay_p    = [p for n, p in model.named_parameters()
                       if p.requires_grad and not any(k in n for k in _NO_DECAY_KEYS)]
@@ -141,7 +141,9 @@ def _make_scheduler(optimizer, cfg: TrainCfg):
         return None
     kw = cfg.scheduler_kwargs or {}
     if cfg.scheduler == 'cosine':
-        return CosineAnnealingLR(optimizer, T_max=kw.get('T_max', cfg.num_epochs))
+        return CosineAnnealingLR(optimizer,
+                                  T_max=kw.get('T_max', cfg.num_epochs),
+                                  eta_min=kw.get('eta_min', cfg.floor_lr))
     if cfg.scheduler == 'step':
         return StepLR(optimizer,
                       step_size=kw.get('step_size', 10),
@@ -157,9 +159,10 @@ def _make_scheduler(optimizer, cfg: TrainCfg):
 
         def _lr_lambda(epoch):
             if epoch < W:
-                # Linear warmup: epoch 0 → 1/W, epoch W-1 → 1.0
+                # Linear warmup: epoch 0 → 1/W, ..., epoch W-1 → 1.0
                 return (epoch + 1) / max(W, 1)
-            progress = (epoch - W) / max(T - W, 1)
+            # Cosine: starts just below 1.0 (no plateau), reaches floor_ratio at last epoch
+            progress = (epoch - W + 1) / max(T - W, 1)
             cos_val  = 0.5 * (1.0 + math.cos(math.pi * progress))
             return floor_ratio + (1.0 - floor_ratio) * cos_val
 
@@ -168,9 +171,7 @@ def _make_scheduler(optimizer, cfg: TrainCfg):
 
 
 def _make_criterion(cfg: TrainCfg):
-    if cfg.criterion == 'ce':
-        return nn.CrossEntropyLoss()
-    if cfg.criterion == 'label_smooth':
+    if cfg.criterion in ('ce', 'label_smooth'):
         return nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
     raise ValueError(f"Unknown criterion: {cfg.criterion!r}")
 
@@ -222,6 +223,8 @@ def main(model_name: str, output_dir,
          source: str = 'auto', num_workers: int = 4):
     if cfg is None:
         cfg = TrainCfg()
+    if not cfg.seeds:
+        raise ValueError('cfg.seeds is empty — provide at least one seed.')
     if model_name not in _MODEL_CFG:
         raise ValueError(f"Unknown model '{model_name}'. Choose from: {list(_MODEL_CFG)}")
 
@@ -316,7 +319,7 @@ def main(model_name: str, output_dir,
             gnorm_tag = '' if cfg.grad_clip is not None else '*'
             print(f'Epoch {epoch:3d}/{cfg.num_epochs}  '
                   f'lr={cur_lr:.3e}  loss={avg_loss:.4f}  gnorm={grad_norm:.3f}{gnorm_tag}  |  '
-                  f'acc={test_acc * 100:.2f}%  macro_f1={test_f1 * 100:.2f}%  {marker}  |  '
+                  f'acc={test_acc * 100:.2f}%{marker}  macro_f1={test_f1 * 100:.2f}%  |  '
                   f'{ep_time:.1f}s  [{elapsed:.0f}s]')
 
             log_rows.append({
@@ -447,9 +450,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='XRF55 benchmark trainer')
     parser.add_argument('--model',          required=True, choices=list(_MODEL_CFG),
                         help='Model: resnet | tfmamba | wavmamba')
-    parser.add_argument('--protocol',       default='plain',
+    parser.add_argument('--protocol',       default='01',
                         choices=list(_PROTOCOL_DEFAULTS),
-                        help='Protocol preset (default: plain)')
+                        help='Protocol preset (default: 01)')
     parser.add_argument('--bench-dir',      default=None)
     parser.add_argument('--amp4d-dir',      default=None)
     parser.add_argument('--source',         default='auto',
