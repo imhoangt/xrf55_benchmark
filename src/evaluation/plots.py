@@ -83,7 +83,7 @@ def plot_raw_vs_preprocessed_amplitude(sample, output_path):
     fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
     for ax, data, title in [
         (axes[0], sample['raw_amplitude'],      'Raw CSI Amplitude'),
-        (axes[1], sample['filtered_amplitude'], 'CSI Amplitude after Hampel + LPF'),
+        (axes[1], sample['filtered_amplitude'], 'CSI Amplitude after Hampel + Butterworth LPF'),
     ]:
         vmin, vmax = np.percentile(data, [1, 99])
         im = ax.imshow(data.T, aspect='auto', origin='lower',
@@ -157,12 +157,12 @@ def plot_1d_subcarrier_amplitude(sample, output_path, subcarrier=9):
     """1D line chart: raw vs filtered amplitude for one subcarrier (rx_01)."""
     raw  = sample['raw_amplitude'][:, subcarrier]
     filt = sample['filtered_amplitude'][:, subcarrier]
-    t    = np.arange(len(raw))
+    t    = np.linspace(0, len(raw) / 200.0, len(raw), endpoint=False)
 
     fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(t, raw,  color='steelblue',  linewidth=0.8, alpha=0.8, label='Before filtering')
-    ax.plot(t, filt, color='darkorange', linewidth=1.2,             label='After filtering')
-    ax.set_xlabel('Timesteps')
+    ax.plot(t, raw,  color='steelblue',  linewidth=0.8, alpha=0.8, label='Raw CSI Amplitude')
+    ax.plot(t, filt, color='darkorange', linewidth=1.2,             label='After Hampel + Butterworth LPF')
+    ax.set_xlabel('Time (s)')
     ax.set_ylabel('Amplitude')
     ax.set_title('CSI Amplitude before and after preprocessing')
     ax.legend(loc='upper right')
@@ -177,12 +177,12 @@ def plot_1d_subcarrier_phase(sample, output_path, subcarrier=9):
     """1D line chart: raw vs filtered phase for one subcarrier (rx_01)."""
     raw  = sample['raw_phase'][:, subcarrier]
     filt = sample['filtered_phase'][:, subcarrier]
-    t    = np.arange(len(raw))
+    t    = np.linspace(0, len(raw) / 200.0, len(raw), endpoint=False)
 
     fig, ax = plt.subplots(figsize=(12, 4))
     ax.plot(t, raw,  color='steelblue',  linewidth=0.8, alpha=0.8, label='Raw CSI Phase (wrapped)')
     ax.plot(t, filt, color='darkorange', linewidth=1.2,             label='CSI Phase after Conj. Diff + Unwrap + Detrend')
-    ax.set_xlabel('Timesteps')
+    ax.set_xlabel('Time (s)')
     ax.set_ylabel('Phase (rad)')
     ax.set_title('CSI Phase before and after preprocessing')
     ax.legend(loc='upper right')
