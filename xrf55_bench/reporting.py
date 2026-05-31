@@ -59,7 +59,7 @@ def _plot_training_curve(log_per_seed: dict, plots_dir: Path, title: str):
         loss_handles[0].set_label('Loss')
         acc_handles[0].set_label('Test Acc (%)')
         ax1.legend(handles=[loss_handles[0], acc_handles[0]],
-                   loc='center left', fontsize=9)
+                   loc='center right', fontsize=9)
         fig.tight_layout()
     else:
         # Legend layout (column-major fill):

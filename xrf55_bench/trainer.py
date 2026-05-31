@@ -9,7 +9,7 @@ Protocols
 ---------
   01  AdamW lr=1e-4  wd=0.01, no scheduler, 40ep  (tf_mamba paper)
   02  Adam  lr=1e-3, MultiStepLR,   200ep  (XRF55 paper)
-  03  AdamW lr=4e-4, warmup+cosine, 120ep  (APWMamba paper)
+  03  AdamW lr=5e-4, warmup(10ep)+cosine, 200ep  (APWMamba paper)
 
 All protocols: no early stop, FP32.
   last_model.pt  — epoch cuối (model chính, dùng cho final eval)
@@ -110,17 +110,41 @@ def _get_model_cfg(model_name: str) -> dict:
 
 # ── Factory functions ─────────────────────────────────────────────────────────
 
-# Params excluded from weight_decay in apwmamba protocol
-_NO_DECAY_KEYS = {'bias', 'A_log', 'D', 'pos'}
+# Params excluded from weight_decay in protocol 03
+_NO_DECAY_KEYS  = {'bias', 'A_log', 'D', 'pos_emb'}
+_NORM_MODULES   = (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d,
+                   nn.BatchNorm3d, nn.GroupNorm)
+
+
+def _build_no_decay_set(model: nn.Module) -> set:
+    """Return the set of parameter names that must NOT receive weight decay.
+
+    Three categories:
+      - All params of norm layers (weight/bias): LayerNorm, BatchNorm, GroupNorm,
+        and custom RMSNorm (WavMamba) — detected by module type, not by name.
+      - Mamba SSM structural params matched by substring: A_log, D.
+      - Learnable positional embedding: pos_emb (WavMamba).
+      - All bias params.
+    """
+    no_decay: set = set()
+    for mn, m in model.named_modules():
+        is_norm = isinstance(m, _NORM_MODULES) or type(m).__name__ == 'RMSNorm'
+        if is_norm:
+            for pn, _ in m.named_parameters(recurse=False):
+                no_decay.add(f'{mn}.{pn}' if mn else pn)
+    for pn, _ in model.named_parameters():
+        if any(k in pn for k in _NO_DECAY_KEYS):
+            no_decay.add(pn)
+    return no_decay
 
 
 def _make_optimizer(model: nn.Module, cfg: TrainCfg):
     if cfg.protocol == '03':
-        # Selective weight decay — exclude bias/norm/A_log/D/pos
+        no_decay   = _build_no_decay_set(model)
         decay_p    = [p for n, p in model.named_parameters()
-                      if p.requires_grad and not any(k in n for k in _NO_DECAY_KEYS)]
+                      if p.requires_grad and n not in no_decay]
         no_decay_p = [p for n, p in model.named_parameters()
-                      if p.requires_grad and any(k in n for k in _NO_DECAY_KEYS)]
+                      if p.requires_grad and n in no_decay]
         params = [
             {'params': decay_p,    'weight_decay': cfg.weight_decay},
             {'params': no_decay_p, 'weight_decay': 0.0},
