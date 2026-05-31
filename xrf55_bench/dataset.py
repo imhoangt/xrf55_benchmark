@@ -287,11 +287,11 @@ def build_loaders(model_name: str, stats: dict,
     if src == 'preproc':
         DS   = _PREPROC_DS[model_name]
         root = Path(bench_dir)
-        print(f'  Source: preproc  ({root})')
+        print(f'  Source: Processed CSI Amplitude  ({root})')
     else:
         DS   = _RAW_DS[model_name]
         root = Path(amp4d_dir)
-        print(f'  Source: raw  ({root})')
+        print(f'  Source: Raw CSI Amplitude  ({root})')
 
     kw = _kw(num_workers)
     train_ds = DS(root, 'train', stats)

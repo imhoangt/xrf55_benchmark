@@ -26,8 +26,7 @@ Output: output_dir/
     plots/                  (training_curve, confusion_matrix, [seed_comparison])
     seeds/{seed:03d}/       (training_log.csv, last_model.pt, best_model.pt,
                              test_predictions.npz)
-    results_summary.zip     (metrics + plots + logs + predictions; no model weights)
-    model.zip               (last_model.pt + best_model.pt for all seeds)
+    {model}_{data_mode}_{protocol}.zip  (two folders: results_summary/ + model/)
 """
 import csv
 import math
@@ -51,7 +50,7 @@ from xrf55_bench.config    import TrainCfg, TrainCfg_for_protocol, _PROTOCOL_DEF
 from xrf55_bench.dataset   import build_loaders, load_stats
 from xrf55_bench.reporting import (
     _plot_training_curve, _plot_confusion_matrix, _plot_seed_comparison,
-    _save_zip, _save_model_zip, build_metrics, save_metrics,
+    save_combined_zip, build_metrics, save_metrics,
 )
 from src.training.amp_utils   import torch_load_checkpoint
 from src.training.train_utils import configure_speed_mode, set_seed
@@ -303,21 +302,25 @@ def main(model_name: str, output_dir,
         optimizer = _make_optimizer(model, cfg)
         scheduler = _make_scheduler(optimizer, cfg)
 
-        sched_str = cfg.scheduler or 'None'
         clip_str  = str(cfg.grad_clip) if cfg.grad_clip is not None else 'None'
-        print(f'Model    : {model_name:<10}  Device   : {device}')
-        print(f'Train    : {len(train_loader.dataset):<10}  Test     : {len(test_loader.dataset)}')
-        print(f'Params   : {n_params:,} ({n_params / 1e6:.3f}M)')
-        print(f'Protocol : {cfg.protocol}  |  '
-              f'opt={cfg.optimizer}  lr={cfg.lr}  bs={cfg.batch_size}  '
-              f'wd={cfg.weight_decay}  clip={clip_str}')
+        betas_str = f'({cfg.betas[0]},{cfg.betas[1]})'
+        sched_str = cfg.scheduler or 'None'
         sched_detail = ''
         if cfg.scheduler == 'warmup_cosine':
             sched_detail = f'  warmup={cfg.warmup_epochs}ep  floor={cfg.floor_lr}'
         elif cfg.scheduler == 'multistep':
             kw = cfg.scheduler_kwargs or {}
-            sched_detail = f"  milestones={kw.get('milestones',[40,80,120,160])}  gamma={kw.get('gamma',0.5)}"
+            sched_detail = (f"  milestones={kw.get('milestones',[40,80,120,160])}"
+                            f"  gamma={kw.get('gamma',0.5)}")
+        print(f'Model    : {model_name:<10}  Device   : {device}')
+        print(f'Train    : {len(train_loader.dataset):<10}  Test     : {len(test_loader.dataset)}')
+        print(f'Params   : {n_params:,} ({n_params / 1e6:.3f}M)')
+        print(f'Protocol : {cfg.protocol}  |  data={cfg.data_mode}  seeds={list(cfg.seeds)}')
+        print(f'Opt      : {cfg.optimizer}  betas={betas_str}  eps={cfg.eps}')
+        print(f'Hyper    : lr={cfg.lr}  bs={cfg.batch_size}  epochs={cfg.num_epochs}  '
+              f'wd={cfg.weight_decay}  clip={clip_str}')
         print(f'Sched    : {sched_str}{sched_detail}')
+        print(f'Loss     : {cfg.criterion}  label_smooth={cfg.label_smoothing}')
         print('─' * 65)
 
         log_rows      = []
@@ -470,11 +473,10 @@ def main(model_name: str, output_dir,
     save_metrics(output_dir, metrics)
 
     # ── ZIP ───────────────────────────────────────────────────────────────────
-    zip_path   = _save_zip(output_dir, model_name, cfg.seeds)
-    model_zip  = _save_model_zip(output_dir, model_name, cfg.seeds)
-    print(f'\nSaved     : {output_dir}')
-    print(f'ZIP       : {zip_path}')
-    print(f'Model ZIP : {model_zip}')
+    zip_path = save_combined_zip(
+        output_dir, model_name, cfg.data_mode, cfg.protocol, cfg.seeds)
+    print(f'\nSaved : {output_dir}')
+    print(f'ZIP   : {zip_path}')
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -512,6 +514,8 @@ if __name__ == '__main__':
     parser.add_argument('--amp4d-dir',      default=None)
     parser.add_argument('--source',         default='auto',
                         choices=['auto', 'preproc', 'raw'])
+    parser.add_argument('--data-mode',     default='raw', choices=['raw', 'proc'],
+                        help='Data mode for zip naming (default: raw)')
     parser.add_argument('--output-dir',     default=None)
     parser.add_argument('--seeds',          nargs='+', type=int, default=None,
                         help='Seeds, e.g. --seeds 4 8 17 42  (default: [42])')
@@ -542,6 +546,7 @@ if __name__ == '__main__':
     if args.weight_decay  is not None: overrides['weight_decay']  = args.weight_decay
     if args.grad_clip     is not None: overrides['grad_clip']     = args.grad_clip
     if args.criterion     is not None: overrides['criterion']     = args.criterion
+    overrides['data_mode'] = args.data_mode
 
     _cfg   = TrainCfg_for_protocol(args.protocol, **overrides)
     _bench = Path(args.bench_dir)  if args.bench_dir  else _default_bench_dir()

@@ -142,38 +142,37 @@ def _plot_seed_comparison(per_seed_results: dict, plots_dir: Path, title: str):
 
 # ── ZIP ───────────────────────────────────────────────────────────────────────
 
-def _save_zip(output_dir: Path, model_name: str, seeds) -> Path:
-    """Pack metrics + plots + per-seed logs/predictions. Excludes model weights."""
-    folder   = f'xrf55_bench_{model_name}'
-    zip_path = output_dir / 'results_summary.zip'
+def save_combined_zip(output_dir: Path, model_name: str,
+                      data_mode: str, protocol: str, seeds) -> Path:
+    """Single zip named {model}_{data_mode}_{protocol}.zip with two folders:
+      results_summary/  — metrics, plots, logs, predictions (no weights)
+      model/            — last_model.pt + best_model.pt per seed (stored uncompressed)
+    """
+    zip_name = f'{model_name}_{data_mode}_{protocol}'
+    zip_path = output_dir / f'{zip_name}.zip'
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # results_summary/
         p = output_dir / 'metrics.json'
         if p.exists():
-            zf.write(p, f'{folder}/metrics.json')
+            zf.write(p, 'results_summary/metrics.json')
         for fname in ['training_curve.png', 'confusion_matrix.png', 'seed_comparison.png']:
             p = output_dir / 'plots' / fname
             if p.exists():
-                zf.write(p, f'{folder}/plots/{fname}')
+                zf.write(p, f'results_summary/plots/{fname}')
         for seed in seeds:
             sd = output_dir / 'seeds' / f'{seed:03d}'
             for fname in ['training_log.csv', 'test_predictions.npz']:
                 p = sd / fname
                 if p.exists():
-                    zf.write(p, f'{folder}/seeds/{seed:03d}/{fname}')
-    return zip_path
-
-
-def _save_model_zip(output_dir: Path, model_name: str, seeds) -> Path:
-    """Pack last_model.pt + best_model.pt for all seeds."""
-    folder   = f'xrf55_bench_{model_name}'
-    zip_path = output_dir / 'model.zip'
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
+                    zf.write(p, f'results_summary/seeds/{seed:03d}/{fname}')
+        # model/ — weights stored uncompressed (already binary)
         for seed in seeds:
             sd = output_dir / 'seeds' / f'{seed:03d}'
             for fname in ['last_model.pt', 'best_model.pt']:
                 p = sd / fname
                 if p.exists():
-                    zf.write(p, f'{folder}/seeds/{seed:03d}/{fname}')
+                    zf.write(p, f'model/seeds/{seed:03d}/{fname}',
+                             compress_type=zipfile.ZIP_STORED)
     return zip_path
 
 

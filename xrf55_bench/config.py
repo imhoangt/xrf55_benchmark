@@ -30,6 +30,9 @@ class TrainCfg:
     criterion:        str            = 'ce'
     label_smoothing:  float          = 0.0
 
+    # Data mode: 'raw' | 'proc'
+    data_mode:        str            = 'raw'
+
     # Seeds — (42,) single default, (4, 8, 17, 42) multi
     seeds:            tuple          = (42,)
 
