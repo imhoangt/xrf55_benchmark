@@ -7,8 +7,8 @@ Split: train=reps 1-14 (4620), test=reps 15-20 (1980). No val.
 
 Protocols
 ---------
-  01  AdamW lr=1e-3, no scheduler,   40ep  (tf_mamba paper)
-  02  Adam  lr=1e-3, MultiStepLR,   200ep  (XRF55 paper, no grad clip)
+  01  AdamW lr=1e-4  wd=0.01, no scheduler, 40ep  (tf_mamba paper)
+  02  Adam  lr=1e-3, MultiStepLR,   200ep  (XRF55 paper)
   03  AdamW lr=4e-4, warmup+cosine, 120ep  (APWMamba paper)
 
 All protocols: no early stop, FP32.
