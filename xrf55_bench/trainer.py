@@ -47,17 +47,6 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.preprocessing.parser import ACTION_NAMES
-from baselines.base_models.resnet1d_base.model       import resnet18
-from baselines.base_models.resnet1d_base.train_utils import (
-    evaluate as eval_1s, evaluate_full as eval_full_1s,
-    measure_efficiency as meas_1s,
-)
-from baselines.base_models.tf_mamba_base.model       import TFMamba
-from baselines.base_models.tf_mamba_base.train_utils import (
-    evaluate as eval_2s, evaluate_full as eval_full_2s,
-    measure_efficiency as meas_2s,
-)
-from baselines.base_models.wavcnnmamba.model          import WavMambaHAR
 from xrf55_bench.config    import TrainCfg, TrainCfg_for_protocol, _PROTOCOL_DEFAULTS
 from xrf55_bench.dataset   import build_loaders, load_stats
 from xrf55_bench.reporting import (
@@ -70,38 +59,53 @@ from src.training.train_utils import configure_speed_mode, set_seed
 
 # ── Model configs ─────────────────────────────────────────────────────────────
 
-NUM_CLASSES = 11
+NUM_CLASSES  = 11
+_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba']
 
-_MODEL_CFG = {
-    'resnet': dict(
-        factory      = lambda: resnet18(inchannel=270, num_classes=NUM_CLASSES),
-        title        = 'ResNet18-1D',
-        is_2stream   = False,
-        eval_fn      = eval_1s,
-        eval_full_fn = eval_full_1s,
-        meas_fn      = lambda m, d: meas_1s(m, d, x_shape=(270, 1000)),
-    ),
-    'tfmamba': dict(
-        factory      = lambda: TFMamba(
-            num_features=135, d_model=64, num_layers=3,
-            num_classes=NUM_CLASSES, max_len=500,
-        ),
-        title        = 'TF-Mamba',
-        is_2stream   = True,
-        eval_fn      = eval_2s,
-        eval_full_fn = eval_full_2s,
-        meas_fn      = lambda m, d: meas_2s(m, d,
-                            xh_shape=(500, 135), xv_shape=(500, 135)),
-    ),
-    'wavmamba': dict(
-        factory      = lambda: WavMambaHAR(num_classes=NUM_CLASSES),
-        title        = 'WavMambaHAR',
-        is_2stream   = False,
-        eval_fn      = eval_1s,
-        eval_full_fn = eval_full_1s,
-        meas_fn      = lambda m, d: meas_1s(m, d, x_shape=(27, 500, 15)),
-    ),
-}
+
+def _get_model_cfg(model_name: str) -> dict:
+    """Return model config dict with lazy-loaded imports."""
+    if model_name == 'resnet':
+        from baselines.base_models.resnet1d_base.model import resnet18
+        from baselines.base_models.resnet1d_base.train_utils import (
+            evaluate, evaluate_full, measure_efficiency)
+        return dict(
+            factory      = lambda: resnet18(inchannel=270, num_classes=NUM_CLASSES),
+            title        = 'ResNet18-1D',
+            is_2stream   = False,
+            eval_fn      = evaluate,
+            eval_full_fn = evaluate_full,
+            meas_fn      = lambda m, d: measure_efficiency(m, d, x_shape=(270, 1000)),
+        )
+    if model_name == 'tfmamba':
+        from baselines.base_models.tf_mamba_base.model import TFMamba
+        from baselines.base_models.tf_mamba_base.train_utils import (
+            evaluate, evaluate_full, measure_efficiency)
+        return dict(
+            factory      = lambda: TFMamba(
+                num_features=135, d_model=64, num_layers=3,
+                num_classes=NUM_CLASSES, max_len=500,
+            ),
+            title        = 'TF-Mamba',
+            is_2stream   = True,
+            eval_fn      = evaluate,
+            eval_full_fn = evaluate_full,
+            meas_fn      = lambda m, d: measure_efficiency(
+                m, d, xh_shape=(500, 135), xv_shape=(500, 135)),
+        )
+    if model_name == 'wavmamba':
+        from baselines.base_models.wavcnnmamba.model import WavMambaHAR
+        from baselines.base_models.resnet1d_base.train_utils import (
+            evaluate, evaluate_full, measure_efficiency)
+        return dict(
+            factory      = lambda: WavMambaHAR(num_classes=NUM_CLASSES),
+            title        = 'WavMambaHAR',
+            is_2stream   = False,
+            eval_fn      = evaluate,
+            eval_full_fn = evaluate_full,
+            meas_fn      = lambda m, d: measure_efficiency(m, d, x_shape=(27, 500, 15)),
+        )
+    raise ValueError(f"Unknown model '{model_name}'. Choose from: {_MODEL_NAMES}")
 
 
 # ── Factory functions ─────────────────────────────────────────────────────────
@@ -225,8 +229,8 @@ def main(model_name: str, output_dir,
         cfg = TrainCfg()
     if not cfg.seeds:
         raise ValueError('cfg.seeds is empty — provide at least one seed.')
-    if model_name not in _MODEL_CFG:
-        raise ValueError(f"Unknown model '{model_name}'. Choose from: {list(_MODEL_CFG)}")
+    if model_name not in _MODEL_NAMES:
+        raise ValueError(f"Unknown model '{model_name}'. Choose from: {_MODEL_NAMES}")
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -236,7 +240,7 @@ def main(model_name: str, output_dir,
     configure_speed_mode()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    mc           = _MODEL_CFG[model_name]
+    mc           = _get_model_cfg(model_name)
     model_title  = mc['title']
     is_2stream   = mc['is_2stream']
     eval_fn      = mc['eval_fn']
@@ -448,7 +452,7 @@ def _default_output_dir(model_name: str):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='XRF55 benchmark trainer')
-    parser.add_argument('--model',          required=True, choices=list(_MODEL_CFG),
+    parser.add_argument('--model',          required=True, choices=_MODEL_NAMES,
                         help='Model: resnet | tfmamba | wavmamba')
     parser.add_argument('--protocol',       default='01',
                         choices=list(_PROTOCOL_DEFAULTS),
