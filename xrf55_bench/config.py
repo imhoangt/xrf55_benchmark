@@ -51,7 +51,7 @@ _PROTOCOL_DEFAULTS = {
     ),
     '03': dict(                         # apwmamba paper
         optimizer='adamw', lr=4e-4,  batch_size=32, num_epochs=120,
-        betas=(0.9, 0.95), eps=1e-8, weight_decay=1e-3,
+        betas=(0.9, 0.99), eps=1e-8, weight_decay=1e-3,
         scheduler='warmup_cosine', warmup_epochs=5, floor_lr=4e-5,
         grad_clip=None, criterion='ce', label_smoothing=0.1,
     ),

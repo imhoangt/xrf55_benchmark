@@ -300,45 +300,58 @@ def main(model_name: str, output_dir,
         t_seed_start  = time.time()
         best_test_acc = 0.0
         best_epoch    = 1
+        _interrupted  = False
 
-        for epoch in range(1, cfg.num_epochs + 1):
-            t_ep   = time.time()
-            cur_lr = optimizer.param_groups[0]['lr']   # LR for this epoch
+        try:
+            for epoch in range(1, cfg.num_epochs + 1):
+                t_ep   = time.time()
+                cur_lr = optimizer.param_groups[0]['lr']   # LR for this epoch
 
-            avg_loss, grad_norm = _train_epoch(
-                model, train_loader, criterion, optimizer, scheduler,
-                device, is_2stream, cfg.grad_clip)
+                avg_loss, grad_norm = _train_epoch(
+                    model, train_loader, criterion, optimizer, scheduler,
+                    device, is_2stream, cfg.grad_clip)
 
-            ep_time  = time.time() - t_ep
-            test_acc, test_f1 = eval_fn(model, test_loader, device)
-            elapsed  = time.time() - t_seed_start
+                ep_time  = time.time() - t_ep
+                test_acc, test_f1 = eval_fn(model, test_loader, device)
+                elapsed  = time.time() - t_seed_start
 
-            is_best = test_acc > best_test_acc
-            if is_best:
-                best_test_acc = test_acc
-                best_epoch    = epoch
-                torch.save(model.state_dict(), seed_dir / 'best_model.pt')
+                is_best = test_acc > best_test_acc
+                if is_best:
+                    best_test_acc = test_acc
+                    best_epoch    = epoch
+                    torch.save(model.state_dict(), seed_dir / 'best_model.pt')
 
-            marker    = '★' if is_best else ' '
-            gnorm_tag = '' if cfg.grad_clip is not None else '*'
-            print(f'Epoch {epoch:3d}/{cfg.num_epochs}  '
-                  f'lr={cur_lr:.3e}  loss={avg_loss:.4f}  gnorm={grad_norm:.3f}{gnorm_tag}  |  '
-                  f'acc={test_acc * 100:.2f}%{marker}  macro_f1={test_f1 * 100:.2f}%  |  '
-                  f'{ep_time:.1f}s  [{elapsed:.0f}s]')
+                marker    = '★' if is_best else ' '
+                gnorm_tag = '' if cfg.grad_clip is not None else '*'
+                print(f'Epoch {epoch:3d}/{cfg.num_epochs}  '
+                      f'lr={cur_lr:.3e}  loss={avg_loss:.4f}  gnorm={grad_norm:.3f}{gnorm_tag}  |  '
+                      f'acc={test_acc * 100:.2f}%{marker}  macro_f1={test_f1 * 100:.2f}%  |  '
+                      f'{ep_time:.1f}s  [{elapsed:.0f}s]')
 
-            log_rows.append({
-                'epoch':         epoch,
-                'lr':            cur_lr,
-                'train_loss':    avg_loss,
-                'grad_norm':     round(grad_norm, 6),
-                'test_acc':      test_acc,
-                'test_f1_macro': test_f1,
-                'epoch_time_s':  round(ep_time, 2),
-                'total_time_s':  round(elapsed, 1),
-            })
+                log_rows.append({
+                    'epoch':         epoch,
+                    'lr':            cur_lr,
+                    'train_loss':    avg_loss,
+                    'grad_norm':     round(grad_norm, 6),
+                    'test_acc':      test_acc,
+                    'test_f1_macro': test_f1,
+                    'epoch_time_s':  round(ep_time, 2),
+                    'total_time_s':  round(elapsed, 1),
+                })
 
-        # Save last epoch (model chính)
-        torch.save(model.state_dict(), seed_dir / 'last_model.pt')
+                # Overwrite every epoch — last_model.pt always = last completed epoch
+                torch.save(model.state_dict(), seed_dir / 'last_model.pt')
+
+        except KeyboardInterrupt:
+            _interrupted = True
+
+        if not log_rows:
+            print(f'\n⚠  Seed {seed}: interrupted before epoch 1 completed — skipping.')
+            continue
+
+        if _interrupted:
+            print(f'\n⚠  Seed {seed}: interrupted at epoch {len(log_rows)}/{cfg.num_epochs}. '
+                  f'Saving partial results...')
 
         with open(seed_dir / 'training_log.csv', 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=[
@@ -372,6 +385,13 @@ def main(model_name: str, output_dir,
             'total_time_s':          round(seed_time),
         }
         per_seed_log_rows[seed] = log_rows
+
+        if _interrupted:
+            break  # don't start next seed
+
+    if not per_seed_results:
+        print('\n⚠  No seeds completed — nothing to save.')
+        return
 
     # ── Efficiency (once, last seed's model) ──────────────────────────────────
     params_m, model_size_mb, macs_g, macs_note, lat_mean, lat_std = \
