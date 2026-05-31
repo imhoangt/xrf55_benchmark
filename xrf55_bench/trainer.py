@@ -15,11 +15,11 @@ All protocols: no early stop, FP32.
   last_model.pt  — epoch cuối (model chính, dùng cho final eval)
   best_model.pt  — epoch có test acc cao nhất trong lúc train
 
-Usage:
-    cd har_csi
-    python xrf55_bench/trainer.py --model resnet --protocol 01
-    python xrf55_bench/trainer.py --model resnet --protocol 02
-    python xrf55_bench/trainer.py --model wavmamba --protocol 03 --seeds 4 8 17 42
+Usage (from notebook / Python):
+    from xrf55_bench.config  import TrainCfg_for_protocol
+    from xrf55_bench.trainer import run
+    cfg = TrainCfg_for_protocol('01', seeds=(42,))
+    run(model_name='resnet', bench_dir=BENCH_DIR, output_dir=OUTPUT_DIR, train_cfg=cfg)
 
 Output: output_dir/
     metrics.json            (config + per_seed + summary)
@@ -46,8 +46,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.preprocessing.parser import ACTION_NAMES
-from xrf55_bench.config    import TrainCfg, TrainCfg_for_protocol, _PROTOCOL_DEFAULTS
-from xrf55_bench.dataset   import build_loaders, load_stats
+from xrf55_bench.config    import TrainCfg
+from xrf55_bench.dataset   import build_loaders, load_stats, infer_data_mode
 from xrf55_bench.reporting import (
     _plot_training_curve, _plot_confusion_matrix, _plot_seed_comparison,
     save_combined_zip, build_metrics, save_metrics,
@@ -198,7 +198,7 @@ def _make_scheduler(optimizer, cfg: TrainCfg):
 
 
 def _make_criterion(cfg: TrainCfg):
-    if cfg.criterion in ('ce', 'label_smooth'):
+    if cfg.criterion == 'ce':
         return nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
     raise ValueError(f"Unknown criterion: {cfg.criterion!r}")
 
@@ -275,6 +275,10 @@ def main(model_name: str, output_dir,
             'bench_dir is required (must contain stats.json). '
             'Run 02_compute_stats_raw.py first, even when source="raw".')
     stats = load_stats(bench_dir)
+
+    # Resolve data_mode: explicit cfg.data_mode wins, else infer from stats.json.
+    if cfg.data_mode is None:
+        cfg.data_mode = infer_data_mode(stats)
 
     per_seed_results  = {}
     per_seed_log_rows = {}
@@ -498,60 +502,3 @@ def _default_bench_dir():
 
 def _default_output_dir(model_name: str):
     return PROJECT_ROOT / 'outputs' / 'runs' / 'xrf55_bench' / model_name
-
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
-
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description='XRF55 benchmark trainer')
-    parser.add_argument('--model',          required=True, choices=_MODEL_NAMES,
-                        help='Model: resnet | tfmamba | wavmamba')
-    parser.add_argument('--protocol',       default='01',
-                        choices=list(_PROTOCOL_DEFAULTS),
-                        help='Protocol preset (default: 01)')
-    parser.add_argument('--bench-dir',      default=None)
-    parser.add_argument('--amp4d-dir',      default=None)
-    parser.add_argument('--source',         default='auto',
-                        choices=['auto', 'preproc', 'raw'])
-    parser.add_argument('--data-mode',     default='raw', choices=['raw', 'proc'],
-                        help='Data mode for zip naming (default: raw)')
-    parser.add_argument('--output-dir',     default=None)
-    parser.add_argument('--seeds',          nargs='+', type=int, default=None,
-                        help='Seeds, e.g. --seeds 4 8 17 42  (default: [42])')
-    # Hyperparameter overrides — all optional, override protocol defaults
-    parser.add_argument('--lr',             type=float, default=None)
-    parser.add_argument('--batch-size',     type=int,   default=None)
-    parser.add_argument('--num-epochs',     type=int,   default=None)
-    parser.add_argument('--optimizer',      default=None, choices=['adamw', 'adam', 'sgd'])
-    parser.add_argument('--scheduler',      default=None,
-                        choices=['cosine', 'step', 'multistep', 'warmup_cosine'])
-    parser.add_argument('--warmup-epochs',  type=int,   default=None)
-    parser.add_argument('--floor-lr',       type=float, default=None)
-    parser.add_argument('--weight-decay',   type=float, default=None)
-    parser.add_argument('--grad-clip',      type=float, default=None)
-    parser.add_argument('--criterion',      default=None, choices=['ce', 'label_smooth'])
-    parser.add_argument('--num-workers',    type=int,   default=4)
-    args = parser.parse_args()
-
-    overrides = {}
-    if args.seeds         is not None: overrides['seeds']         = tuple(args.seeds)
-    if args.lr            is not None: overrides['lr']            = args.lr
-    if args.batch_size    is not None: overrides['batch_size']    = args.batch_size
-    if args.num_epochs    is not None: overrides['num_epochs']    = args.num_epochs
-    if args.optimizer     is not None: overrides['optimizer']     = args.optimizer
-    if args.scheduler     is not None: overrides['scheduler']     = args.scheduler
-    if args.warmup_epochs is not None: overrides['warmup_epochs'] = args.warmup_epochs
-    if args.floor_lr      is not None: overrides['floor_lr']      = args.floor_lr
-    if args.weight_decay  is not None: overrides['weight_decay']  = args.weight_decay
-    if args.grad_clip     is not None: overrides['grad_clip']     = args.grad_clip
-    if args.criterion     is not None: overrides['criterion']     = args.criterion
-    overrides['data_mode'] = args.data_mode
-
-    _cfg   = TrainCfg_for_protocol(args.protocol, **overrides)
-    _bench = Path(args.bench_dir)  if args.bench_dir  else _default_bench_dir()
-    _out   = Path(args.output_dir) if args.output_dir else _default_output_dir(args.model)
-    _amp4d = Path(args.amp4d_dir)  if args.amp4d_dir  else None
-    main(args.model, _out,
-         bench_dir=_bench, amp4d_dir=_amp4d,
-         cfg=_cfg, source=args.source, num_workers=args.num_workers)

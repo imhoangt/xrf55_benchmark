@@ -26,12 +26,12 @@ class TrainCfg:
     floor_lr:         float          = 1e-5
     scheduler_kwargs: Optional[dict] = None
 
-    # Loss: 'ce' | 'label_smooth'
+    # Loss: 'ce' (label smoothing controlled by label_smoothing below)
     criterion:        str            = 'ce'
     label_smoothing:  float          = 0.0
 
-    # Data mode: 'raw' | 'proc'
-    data_mode:        str            = 'raw'
+    # Data mode: 'raw' | 'proc' | None (None = auto-infer from stats.json meta)
+    data_mode:        Optional[str]  = None
 
     # Seeds — (42,) single default, (4, 8, 17, 42) multi
     seeds:            tuple          = (42,)

@@ -41,6 +41,19 @@ def load_stats(bench_dir) -> dict:
         return json.load(f)
 
 
+def infer_data_mode(stats: dict) -> str:
+    """Infer 'proc' | 'raw' from stats.json meta (ground truth).
+
+    Processed stats (04_preprocess_processed.py) carry a 'filter' key and
+    meta.source='amplitude_npy_4d_hampel_lpf'; raw stats (02_compute_stats_raw.py)
+    use meta.source='amplitude_npy_4d' with no filter key.
+    """
+    meta = stats.get('meta', {})
+    if 'filter' in meta or 'hampel' in str(meta.get('source', '')).lower():
+        return 'proc'
+    return 'raw'
+
+
 def _worker_init_fn(worker_id):
     seed = torch.initial_seed() % 2**32
     np.random.seed(seed)
@@ -287,11 +300,17 @@ def build_loaders(model_name: str, stats: dict,
     if src == 'preproc':
         DS   = _PREPROC_DS[model_name]
         root = Path(bench_dir)
-        print(f'  Source: Processed CSI Amplitude  ({root})')
+        # Data nature comes from the stats the arrays were fitted with, not from
+        # the fact that they are pre-saved (preproc) vs computed on-the-fly.
+        data_label = ('Processed CSI Amplitude (Hampel + Butterworth LPF)'
+                      if infer_data_mode(stats) == 'proc' else 'Raw CSI Amplitude')
     else:
         DS   = _RAW_DS[model_name]
         root = Path(amp4d_dir)
-        print(f'  Source: Raw CSI Amplitude  ({root})')
+        # On-the-fly raw mode reads amplitude_npy_4d directly — always unfiltered.
+        data_label = 'Raw CSI Amplitude'
+    print(f'  Data  : {data_label}')
+    print(f'  Loaded: {root}  (source={src})')
 
     kw = _kw(num_workers)
     train_ds = DS(root, 'train', stats)
