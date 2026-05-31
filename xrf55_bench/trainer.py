@@ -166,7 +166,7 @@ def _make_scheduler(optimizer, cfg: TrainCfg):
                 # Linear warmup: epoch 0 → 1/W, ..., epoch W-1 → 1.0
                 return (epoch + 1) / max(W, 1)
             # Cosine: starts just below 1.0 (no plateau), reaches floor_ratio at last epoch
-            progress = (epoch - W + 1) / max(T - W, 1)
+            progress = min((epoch - W + 1) / max(T - W, 1), 1.0)
             cos_val  = 0.5 * (1.0 + math.cos(math.pi * progress))
             return floor_ratio + (1.0 - floor_ratio) * cos_val
 
@@ -322,7 +322,7 @@ def main(model_name: str, output_dir,
                     torch.save(model.state_dict(), seed_dir / 'best_model.pt')
 
                 marker    = '★' if is_best else ' '
-                gnorm_tag = '' if cfg.grad_clip is not None else '*'
+                gnorm_tag = '*' if cfg.grad_clip is not None else ''
                 print(f'Epoch {epoch:3d}/{cfg.num_epochs}  '
                       f'lr={cur_lr:.3e}  loss={avg_loss:.4f}  gnorm={grad_norm:.3f}{gnorm_tag}  |  '
                       f'acc={test_acc * 100:.2f}%{marker}  macro_f1={test_f1 * 100:.2f}%  |  '
@@ -368,7 +368,7 @@ def main(model_name: str, output_dir,
 
         np.savez(seed_dir / 'test_predictions.npz',
                  predictions=np.array(all_preds),
-                 probabilities=np.array(all_probs),
+                 probabilities=np.array(all_probs, dtype=np.float32),
                  labels=np.array(all_labels))
 
         seed_time = time.time() - t_seed_start

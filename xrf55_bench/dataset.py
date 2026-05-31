@@ -126,7 +126,7 @@ class PreprocTFMambaDataset(Dataset):
     def __getitem__(self, idx):
         xh = (self.XH[idx] - self.xh_mean[None, :]) / self.xh_std[None, :]  # (500,135)
         xv = (self.XV[idx] - self.xv_mean[:, None]) / self.xv_std[:, None]  # (135,500)
-        xv = xv.T                                                              # (500,135)
+        xv = np.ascontiguousarray(xv.T)                                        # (500,135) C-contiguous
         return torch.from_numpy(xh), torch.from_numpy(xv), int(self.y[idx])
 
 
@@ -195,7 +195,7 @@ class RawTFMambaDataset(Dataset):
         xv = cV                                                         # (135, 500)
         xh = (xh - self.xh_mean[None, :]) / self.xh_std[None, :]
         xv = (xv - self.xv_mean[:, None]) / self.xv_std[:, None]
-        xv = xv.T                                                       # (500, 135)
+        xv = np.ascontiguousarray(xv.T)                                # (500, 135) C-contiguous
         return torch.from_numpy(xh), torch.from_numpy(xv), label
 
 

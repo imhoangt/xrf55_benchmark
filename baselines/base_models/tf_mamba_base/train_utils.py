@@ -40,7 +40,7 @@ def measure_efficiency(model, device, xh_shape, xv_shape):
 
     Args:
         xh_shape: (seq_len, features) of XH — e.g. (500, 135)
-        xv_shape: (seq_len, features) of XV — e.g. (135, 500)
+        xv_shape: (seq_len, features) of XV — e.g. (500, 135)
     """
     params_m = sum(p.numel() for p in model.parameters()) / 1e6
 
