@@ -333,7 +333,7 @@ def main(model_name: str, output_dir,
                     'lr':            cur_lr,
                     'train_loss':    avg_loss,
                     'grad_norm':     round(grad_norm, 6),
-                    'test_acc':      test_acc,
+                    'test_accuracy': test_acc,
                     'test_f1_macro': test_f1,
                     'epoch_time_s':  round(ep_time, 2),
                     'total_time_s':  round(elapsed, 1),
@@ -352,11 +352,18 @@ def main(model_name: str, output_dir,
         if _interrupted:
             print(f'\n⚠  Seed {seed}: interrupted at epoch {len(log_rows)}/{cfg.num_epochs}. '
                   f'Saving partial results...')
+            # Kaggle Stop kills DataLoader worker PIDs — rebuild with num_workers=0
+            _, test_loader = build_loaders(
+                model_name, stats,
+                bench_dir=bench_dir, amp4d_dir=amp4d_dir,
+                source=source,
+                batch_size=cfg.batch_size, num_workers=0,
+            )
 
         with open(seed_dir / 'training_log.csv', 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=[
                 'epoch', 'lr', 'train_loss', 'grad_norm',
-                'test_acc', 'test_f1_macro', 'epoch_time_s', 'total_time_s'])
+                'test_accuracy', 'test_f1_macro', 'epoch_time_s', 'total_time_s'])
             writer.writeheader()
             writer.writerows(log_rows)
 

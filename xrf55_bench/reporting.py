@@ -37,7 +37,7 @@ def _plot_training_curve(log_per_seed: dict, plots_dir: Path, title: str):
         acc_c  = _ACC_COLOR  if not multi else c
         epochs = [r['epoch']         for r in rows]
         losses = [r['train_loss']     for r in rows]
-        accs   = [r['test_acc'] * 100 for r in rows]
+        accs   = [r['test_accuracy'] * 100 for r in rows]
         alpha  = 0.85 if multi else 1.0
         lw     = 1.5  if multi else 2.0
         lbl    = f's={seed}'
