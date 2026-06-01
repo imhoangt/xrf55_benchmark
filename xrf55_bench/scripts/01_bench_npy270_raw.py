@@ -128,8 +128,8 @@ def _compute_stats(all_files: list, npy_dir: Path) -> dict:
     xv_sum_sq = np.zeros(135, dtype=np.float64)
     haar_n    = np.int64(0)
 
-    wav_sum    = np.zeros(27, dtype=np.float64)
-    wav_sum_sq = np.zeros(27, dtype=np.float64)
+    wav_sum    = np.zeros((27, 15), dtype=np.float64)
+    wav_sum_sq = np.zeros((27, 15), dtype=np.float64)
     wav_n      = np.int64(0)
 
     for fpath in tqdm(all_files, desc='  Stats', unit='file'):
@@ -150,9 +150,9 @@ def _compute_stats(all_files: list, npy_dir: Path) -> dict:
         haar_n    += np.int64(500)
 
         w64 = wav.astype(np.float64)
-        wav_sum    += w64.sum(axis=(1, 2))
-        wav_sum_sq += (w64 * w64).sum(axis=(1, 2))
-        wav_n      += np.int64(500 * 15)
+        wav_sum    += w64.sum(axis=1)          # sum over time (500) → (27, 15)
+        wav_sum_sq += (w64 * w64).sum(axis=1)
+        wav_n      += np.int64(500)
 
     def _vector(n, s, s2):
         mean = s / n

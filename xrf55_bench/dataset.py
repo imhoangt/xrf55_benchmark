@@ -9,7 +9,7 @@ Model input shapes after normalization:
   resnet    → (270, 1000)          per-channel z-score (270,)
   tfmamba   → XH (500, 135)        per-channel z-score on cH.T
                XV (500, 135)        per-channel z-score on cV.T
-  wavmamba  → (27, 500, 15)        per-channel z-score (27,)
+  wavmamba  → (27, 500, 15)        per-freq z-score (27, 15)
 """
 import json
 import random
@@ -109,13 +109,13 @@ class PreprocWavMambaDataset(Dataset):
         self.X   = np.load(bench_dir / 'wavmamba' / f'X_{split}.npy', mmap_mode='r')
         self.y   = np.load(bench_dir / f'y_{split}.npy')
         s = stats['wavmamba']
-        self.mu  = np.array(s['mean'], dtype=np.float32)  # (27,)
-        self.sig = np.array(s['std'],  dtype=np.float32)
+        self.mu  = np.array(s['mean'], dtype=np.float32)  # (27, 15)
+        self.sig = np.array(s['std'],  dtype=np.float32)  # (27, 15)
 
     def __len__(self):  return len(self.y)
 
     def __getitem__(self, idx):
-        x = (self.X[idx] - self.mu[:, None, None]) / self.sig[:, None, None]  # (27, 500, 15)
+        x = (self.X[idx] - self.mu[:, None, :]) / self.sig[:, None, :]  # (27, 500, 15)
         return torch.from_numpy(x), int(self.y[idx])
 
 

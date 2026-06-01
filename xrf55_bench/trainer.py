@@ -28,6 +28,7 @@ Output: output_dir/
                              test_predictions.npz)
     {model}_{data_mode}_{protocol}.zip  (two folders: results_summary/ + model/)
 """
+import copy
 import csv
 import math
 import sys
@@ -276,7 +277,8 @@ def main(model_name: str, output_dir,
             'Run 01_bench_npy270_raw.py or 02_bench_npy270_proc.py first.')
     stats = load_stats(bench_dir)
 
-    # Resolve data_mode: explicit cfg.data_mode wins, else infer from stats.json.
+    # Work on a local copy so we never mutate the caller's cfg object.
+    cfg = copy.copy(cfg)
     if cfg.data_mode is None:
         cfg.data_mode = infer_data_mode(stats)
 
@@ -371,6 +373,10 @@ def main(model_name: str, output_dir,
 
                 # Overwrite every epoch — last_model.pt always = last completed epoch
                 torch.save(model.state_dict(), seed_dir / 'last_model.pt')
+
+                if cfg.protocol == '01' and avg_loss < 0.01:
+                    print(f'  Early stop: train_loss={avg_loss:.6f} < 0.01')
+                    break
 
         except KeyboardInterrupt:
             _interrupted = True
