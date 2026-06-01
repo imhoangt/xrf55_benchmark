@@ -1,31 +1,32 @@
 """Amplitude pipeline visualization — raw, preprocessed, and DWT stages.
 
+Reads from raw_npy/ (270, 1000) format. Displays channel 0
+(device 1, antenna 0 — rows 0-29 of the 270-axis) across all 30 subcarriers.
+
 Sample:
   vol=01  action=35 (Running)  rep=11
-  File: <amp4d_dir>/01/01_35_11.npy
-  Channel displayed: receiver 0, antenna 0  (channel 0 of 9 RX×ANT pairs)
 
 Generates 6 plots:
-  plot1_single_subcarrier_raw_vs_proc.png  1D: raw vs Hampel+Butterworth LPF, subcarrier 10/30
-  plot2_all_subcarriers_raw_vs_proc.png    2D: raw vs Hampel+Butterworth LPF, all 30 subcarriers
-  plot3_raw_vs_raw_dwt_haar.png            top: raw  /  bottom: 4 DWT-Haar subbands
-  plot4_raw_vs_raw_dwt_db4.png             top: raw  /  bottom: 4 DWT-db4  subbands
-  plot5_proc_vs_proc_dwt_haar.png          top: proc /  bottom: 4 DWT-Haar subbands
-  plot6_proc_vs_proc_dwt_db4.png           top: proc /  bottom: 4 DWT-db4  subbands
+  plot1_single_subcarrier_raw_vs_proc.png   1D: raw vs Hampel+Butterworth LPF, subcarrier 10/30
+  plot2_all_subcarriers_raw_vs_proc.png     2D: raw vs Hampel+Butterworth LPF, all 30 subcarriers
+  plot3_raw_vs_raw_dwt_haar.png             top: raw  /  bottom: 4 DWT-Haar subbands
+  plot4_raw_vs_raw_dwt_db4.png              top: raw  /  bottom: 4 DWT-db4  subbands
+  plot5_proc_vs_proc_dwt_haar.png           top: proc /  bottom: 4 DWT-Haar subbands
+  plot6_proc_vs_proc_dwt_db4.png            top: proc /  bottom: 4 DWT-db4  subbands
 
 Output: xrf55_bench/outputs/local_plots/
 
 Usage:
     cd har_csi
-    python xrf55_bench/scripts/05_amplitude_dwt_plots.py
-    python xrf55_bench/scripts/05_amplitude_dwt_plots.py --amp4d-dir E:/amplitude_npy_4d
+    python xrf55_bench/scripts/03_amplitude_dwt_plots.py
+    python xrf55_bench/scripts/03_amplitude_dwt_plots.py --npy-dir D:/XRF55/raw_npy
 """
 import argparse
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent    # har_csi/
-_BENCH_ROOT  = Path(__file__).parent.parent           # har_csi/xrf55_bench/
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+_BENCH_ROOT  = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import matplotlib
@@ -40,43 +41,42 @@ from src.data.preprocessing.amplitude import hampel_vectorized
 from src.data.preprocessing.parser    import ACTION_NAMES, ACTION_ID_TO_LABEL
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-_AMP4D_DIR_DEFAULT = PROJECT_ROOT / 'dataset' / 'XRF55' / 'amplitude_npy_4d'
-PLOTS_DIR          = _BENCH_ROOT  / 'outputs' / 'local_plots'
+_NPY_DIR_DEFAULT = PROJECT_ROOT / 'dataset' / 'XRF55' / 'raw_npy'
+PLOTS_DIR        = _BENCH_ROOT  / 'outputs' / 'local_plots'
 
 VOL_ID         = 1
-ACTION_ID      = 35    # Running  (filename ID, NOT class label 0-10)
+ACTION_ID      = 35    # Running
 VIZ_REP        = 11
-VIZ_SUBCARRIER = 9     # 0-indexed  →  Subcarrier 10/30
+VIZ_SUBCARRIER = 9     # 0-indexed → Subcarrier 10/30
 
 _DUR_S = 5.0           # 1000 frames @ 200 Hz
 _N_SC  = 30
 
-# Low-pass filter — Butterworth order-4, cutoff 20 Hz, fs=200 Hz
 _SOS = butter(4, 20.0, btype='low', fs=200.0, output='sos')
 
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
-def _load_sample(amp4d_dir: Path):
-    """Load one .npy file; return (raw_ch0, filt_ch0).
+def _load_sample(npy_dir: Path):
+    """Load one raw_npy file; return (raw_ch0, filt_ch0) both (1000, 30) float32.
 
-    raw_ch0  : (1000, 30) float32 — raw amplitude, receiver 0 / antenna 0
-    filt_ch0 : (1000, 30) float32 — same channel after Hampel + Butterworth LPF
+    Channel 0 = device 1, antenna 0 = rows 0-29 of the (270, 1000) array.
     """
-    fpath = amp4d_dir / f'{VOL_ID:02d}' / f'{VOL_ID:02d}_{ACTION_ID:02d}_{VIZ_REP:02d}.npy'
+    fpath = npy_dir / f'{VOL_ID:02d}_{ACTION_ID:02d}_{VIZ_REP:02d}.npy'
     if not fpath.exists():
         raise FileNotFoundError(f'Sample not found: {fpath}')
 
-    raw4d = np.load(fpath)   # (1000, 3, 3, 30) float64
+    arr = np.load(fpath)   # (270, 1000) float64
 
-    # (1000,3,3,30) → (9,1000,30): axis0 = receiver×antenna pairs
-    amp9 = raw4d.transpose(1, 2, 0, 3).reshape(9, 1000, 30).astype(np.float32)
+    # Channel 0: rows 0-29 (device 1, antenna 0), all 30 subcarriers
+    # arr[0:30, :] = (30, 1000) → .T = (1000, 30)
+    raw_ch0 = arr[0:30, :].T.astype(np.float32)   # (1000, 30)
 
-    raw_ch0 = amp9[0].copy()   # (1000, 30)  receiver 0, antenna 0
-
-    amp9_filt = hampel_vectorized(amp9, window=11, n_sigma=3.0)
-    amp9_filt = sosfiltfilt(_SOS, amp9_filt, axis=1).astype(np.float32)
-    filt_ch0  = amp9_filt[0].copy()   # (1000, 30)
+    # Filtered version: reshape to (9, 1000, 30), apply Hampel+LPF, take channel 0
+    x9 = arr.reshape(9, 30, 1000).transpose(0, 2, 1).astype(np.float32)
+    x9 = hampel_vectorized(x9, window=11, n_sigma=3.0)
+    x9 = sosfiltfilt(_SOS, x9, axis=1).astype(np.float32)
+    filt_ch0 = x9[0].copy()   # (1000, 30)
 
     return raw_ch0, filt_ch0
 
@@ -96,7 +96,6 @@ def _suptitle(subcarrier=None, all_subcarriers=False) -> str:
 
 def _heatmap(ax, data: np.ndarray, title: str,
              x_end: float, y_end: float, cmap: str = 'viridis'):
-    """Render (T, F) as a heatmap. Per-panel percentile color range."""
     vmin = float(np.percentile(data, 1))
     vmax = float(np.percentile(data, 99))
     im = ax.imshow(
@@ -108,7 +107,7 @@ def _heatmap(ax, data: np.ndarray, title: str,
     return im
 
 
-# ── Plot 1: 1D, single subcarrier ─────────────────────────────────────────────
+# ── Plot 1: 1D, single subcarrier ────────────────────────────────���────────────
 
 def plot1_single_subcarrier(raw, filt, out_path):
     sc = VIZ_SUBCARRIER
@@ -154,11 +153,6 @@ _WAV_DISPLAY = {'haar': 'Haar', 'db4': 'db4'}
 
 
 def _plot_vs_dwt(amp: np.ndarray, amp_title: str, wavelet: str, out_path):
-    """GridSpec layout:
-      top row  (full width) : input signal before DWT
-      middle                : row label "... after DWT"
-      bottom row (4 panels) : LL (cA), HL (cH), LH (cV), HH (cD)
-    """
     wav_display = _WAV_DISPLAY.get(wavelet, wavelet)
     cA, (cH, cV, cD) = pywt.dwt2(amp, wavelet=wavelet, mode='periodization')
 
@@ -166,7 +160,6 @@ def _plot_vs_dwt(amp: np.ndarray, amp_title: str, wavelet: str, out_path):
     gs  = GridSpec(2, 4, figure=fig, height_ratios=[1.2, 1],
                    hspace=0.45, wspace=0.35)
 
-    # ── Top: input signal ──────────────────────────────────────────────────────
     ax_top = fig.add_subplot(gs[0, :])
     vmax   = float(np.percentile(np.abs(amp), 99))
     im_top = ax_top.imshow(
@@ -176,7 +169,6 @@ def _plot_vs_dwt(amp: np.ndarray, amp_title: str, wavelet: str, out_path):
     ax_top.set_title(f'{amp_title} before {wav_display} DWT', fontsize=14)
     plt.colorbar(im_top, ax=ax_top, fraction=0.023)
 
-    # ── Bottom: 4 DWT subbands ─────────────────────────────────────────────────
     bottom_axes = []
     for col, (subband, title) in enumerate([
         (cA, 'LL (cA)'), (cH, 'HL (cH)'), (cV, 'LH (cV)'), (cD, 'HH (cD)'),
@@ -193,7 +185,6 @@ def _plot_vs_dwt(amp: np.ndarray, amp_title: str, wavelet: str, out_path):
         plt.colorbar(im, ax=ax, fraction=0.046)
         bottom_axes.append(ax)
 
-    # ── Middle label: "{amp_title} after {wavelet} DWT" ───────────────────────
     fig.canvas.draw()
     top_y0    = ax_top.get_position().y0
     bottom_y1 = bottom_axes[0].get_position().y1
@@ -207,63 +198,56 @@ def _plot_vs_dwt(amp: np.ndarray, amp_title: str, wavelet: str, out_path):
 
 
 def plot3_raw_vs_raw_haar(raw, out_path):
-    _plot_vs_dwt(raw, 'Raw CSI Amplitude', 'haar', out_path)
-
+    _plot_vs_dwt(raw,  'Raw CSI Amplitude',       'haar', out_path)
 
 def plot4_raw_vs_raw_db4(raw, out_path):
-    _plot_vs_dwt(raw, 'Raw CSI Amplitude', 'db4', out_path)
-
+    _plot_vs_dwt(raw,  'Raw CSI Amplitude',       'db4',  out_path)
 
 def plot5_proc_vs_proc_haar(filt, out_path):
     _plot_vs_dwt(filt, 'Processed CSI Amplitude', 'haar', out_path)
 
-
 def plot6_proc_vs_proc_db4(filt, out_path):
-    _plot_vs_dwt(filt, 'Processed CSI Amplitude', 'db4', out_path)
+    _plot_vs_dwt(filt, 'Processed CSI Amplitude', 'db4',  out_path)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-def main(amp4d_dir: Path):
-    fpath       = amp4d_dir / f'{VOL_ID:02d}' / f'{VOL_ID:02d}_{ACTION_ID:02d}_{VIZ_REP:02d}.npy'
+def main(npy_dir: Path):
+    fpath       = npy_dir / f'{VOL_ID:02d}_{ACTION_ID:02d}_{VIZ_REP:02d}.npy'
     action_name = ACTION_NAMES[ACTION_ID_TO_LABEL[ACTION_ID]]
 
-    print('─' * 60)
-    print(f'Sample  : vol={VOL_ID:02d}  action={ACTION_ID} ({action_name})  rep={VIZ_REP:02d}')
-    print(f'File    : {fpath}')
-    print(f'Channel : receiver 0, antenna 0  (index 0 of 9 RX×ANT pairs)')
-    print(f'Output  : {PLOTS_DIR}')
-    print('─' * 60)
+    print('-' * 60)
+    print(f'Sample : vol={VOL_ID:02d}  action={ACTION_ID} ({action_name})  rep={VIZ_REP:02d}')
+    print(f'File   : {fpath}')
+    print(f'Channel: device 1, antenna 0  (rows 0-29 of 270-axis)')
+    print(f'Output : {PLOTS_DIR}')
+    print('-' * 60)
 
-    raw, filt = _load_sample(amp4d_dir)
-    print(f'Loaded  : shape {raw.shape}  dtype {raw.dtype}')
-    print(f'Raw     : min={raw.min():.3f}  max={raw.max():.3f}  mean={raw.mean():.3f}')
-    print(f'Filtered: min={filt.min():.3f}  max={filt.max():.3f}  mean={filt.mean():.3f}\n')
+    raw, filt = _load_sample(npy_dir)
+    print(f'Loaded : shape {raw.shape}  dtype {raw.dtype}')
+    print(f'Raw    : min={raw.min():.3f}  max={raw.max():.3f}  mean={raw.mean():.3f}')
+    print(f'Filt   : min={filt.min():.3f}  max={filt.max():.3f}  mean={filt.mean():.3f}\n')
 
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
     plot1_single_subcarrier(raw, filt,
                             PLOTS_DIR / 'plot1_single_subcarrier_raw_vs_proc.png')
-    print('Plot 1: 1D subcarrier 10/30 — raw vs preprocessed')
+    print('Plot 1: 1D subcarrier 10/30 - raw vs preprocessed')
 
     plot2_all_subcarriers(raw, filt,
                           PLOTS_DIR / 'plot2_all_subcarriers_raw_vs_proc.png')
-    print('Plot 2: 2D all 30 subcarriers — raw vs preprocessed')
+    print('Plot 2: 2D all 30 subcarriers - raw vs preprocessed')
 
-    plot3_raw_vs_raw_haar(raw,
-                          PLOTS_DIR / 'plot3_raw_vs_raw_dwt_haar.png')
+    plot3_raw_vs_raw_haar(raw, PLOTS_DIR / 'plot3_raw_vs_raw_dwt_haar.png')
     print('Plot 3: raw + DWT-Haar (4 subbands)')
 
-    plot4_raw_vs_raw_db4(raw,
-                         PLOTS_DIR / 'plot4_raw_vs_raw_dwt_db4.png')
+    plot4_raw_vs_raw_db4(raw, PLOTS_DIR / 'plot4_raw_vs_raw_dwt_db4.png')
     print('Plot 4: raw + DWT-db4  (4 subbands)')
 
-    plot5_proc_vs_proc_haar(filt,
-                            PLOTS_DIR / 'plot5_proc_vs_proc_dwt_haar.png')
+    plot5_proc_vs_proc_haar(filt, PLOTS_DIR / 'plot5_proc_vs_proc_dwt_haar.png')
     print('Plot 5: preprocessed + DWT-Haar (4 subbands)')
 
-    plot6_proc_vs_proc_db4(filt,
-                           PLOTS_DIR / 'plot6_proc_vs_proc_dwt_db4.png')
+    plot6_proc_vs_proc_db4(filt, PLOTS_DIR / 'plot6_proc_vs_proc_dwt_db4.png')
     print('Plot 6: preprocessed + DWT-db4  (4 subbands)')
 
     print(f'\nAll 6 plots saved to {PLOTS_DIR}')
@@ -272,15 +256,13 @@ def main(amp4d_dir: Path):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Amplitude visualization: raw, preprocessed, DWT (6 plots)')
-    parser.add_argument(
-        '--amp4d-dir', type=str, default=None,
-        help='Path to amplitude_npy_4d/ (default: dataset/XRF55/amplitude_npy_4d)')
+    parser.add_argument('--npy-dir', type=str, default=None,
+                        help='Path to raw_npy/ (default: dataset/XRF55/raw_npy)')
     args = parser.parse_args()
 
-    d = Path(args.amp4d_dir) if args.amp4d_dir else _AMP4D_DIR_DEFAULT
+    d = Path(args.npy_dir) if args.npy_dir else _NPY_DIR_DEFAULT
     if not d.is_absolute():
         d = PROJECT_ROOT / d
     if not d.exists():
-        raise FileNotFoundError(f'amplitude_npy_4d not found: {d}\n'
-                                f'Run 01_convert_to_npy_4d.py first.')
+        raise FileNotFoundError(f'raw_npy not found: {d}')
     main(d)
