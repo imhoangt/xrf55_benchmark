@@ -74,7 +74,7 @@ def _load_sample(npy_dir: Path):
 
     # Filtered version: reshape to (9, 1000, 30), apply Hampel+LPF, take channel 0
     x9 = arr.reshape(9, 30, 1000).transpose(0, 2, 1).astype(np.float32)
-    x9 = hampel_vectorized(x9, window=11, n_sigma=3.0)
+    x9 = hampel_vectorized(x9, window=12, n_sigma=3.0)
     x9 = sosfiltfilt(_SOS, x9, axis=1).astype(np.float32)
     filt_ch0 = x9[0].copy()   # (1000, 30)
 

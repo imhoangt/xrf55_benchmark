@@ -229,7 +229,7 @@ def _save_split(split_name: str, rep_list: list,
 
     print(f'  resnet:      ({n}, 270, 1000)    float32')
     print(f'  tfmamba xh:  ({n}, 500, 135)     float32')
-    print(f'  tfmamba xv:  ({n}, 135, 500)     float32')
+    print(f'  tfmamba xv:  ({n}, 500, 135)     float32')
     print(f'  wavmamba:    ({n}, 27, 500, 15)  float32')
 
 

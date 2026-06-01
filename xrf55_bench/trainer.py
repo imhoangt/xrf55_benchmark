@@ -46,7 +46,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.preprocessing.parser import ACTION_NAMES
-from xrf55_bench.config    import TrainCfg
+from xrf55_bench.config    import TrainCfg, TrainCfg_for_protocol
 from xrf55_bench.dataset   import build_loaders, load_stats, infer_data_mode
 from xrf55_bench.reporting import (
     _plot_training_curve, _plot_confusion_matrix, _plot_seed_comparison,
@@ -245,11 +245,11 @@ def _train_epoch(model, loader, criterion, optimizer, scheduler,
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main(model_name: str, output_dir,
-         bench_dir=None, amp4d_dir=None,
+         bench_dir=None,
          cfg: TrainCfg = None,
-         source: str = 'auto', num_workers: int = 4):
+         num_workers: int = 4):
     if cfg is None:
-        cfg = TrainCfg()
+        cfg = TrainCfg_for_protocol('01')
     if not cfg.seeds:
         raise ValueError('cfg.seeds is empty — provide at least one seed.')
     if model_name not in _MODEL_NAMES:
@@ -273,7 +273,7 @@ def main(model_name: str, output_dir,
     if bench_dir is None:
         raise ValueError(
             'bench_dir is required (must contain stats.json). '
-            'Run 02_compute_stats_raw.py first, even when source="raw".')
+            'Run 01_bench_npy270_raw.py or 02_bench_npy270_proc.py first.')
     stats = load_stats(bench_dir)
 
     # Resolve data_mode: explicit cfg.data_mode wins, else infer from stats.json.
@@ -295,8 +295,7 @@ def main(model_name: str, output_dir,
 
         train_loader, test_loader = build_loaders(
             model_name, stats,
-            bench_dir=bench_dir, amp4d_dir=amp4d_dir,
-            source=source,
+            bench_dir=bench_dir,
             batch_size=cfg.batch_size, num_workers=num_workers,
         )
 
@@ -386,8 +385,7 @@ def main(model_name: str, output_dir,
             # Kaggle Stop kills DataLoader worker PIDs — rebuild with num_workers=0
             _, test_loader = build_loaders(
                 model_name, stats,
-                bench_dir=bench_dir, amp4d_dir=amp4d_dir,
-                source=source,
+                bench_dir=bench_dir,
                 batch_size=cfg.batch_size, num_workers=0,
             )
 
@@ -485,19 +483,19 @@ def main(model_name: str, output_dir,
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def run(model_name: str, bench_dir=None, amp4d_dir=None,
+def run(model_name: str, bench_dir=None,
         output_dir=None, train_cfg=None,
-        source: str = 'auto', num_workers: int = 4):
+        num_workers: int = 4):
     """Callable entry point for Kaggle notebooks."""
     _bench = Path(bench_dir)  if bench_dir  else _default_bench_dir()
     _out   = Path(output_dir) if output_dir else _default_output_dir(model_name)
     main(model_name, _out,
-         bench_dir=_bench, amp4d_dir=amp4d_dir,
-         cfg=train_cfg, source=source, num_workers=num_workers)
+         bench_dir=_bench,
+         cfg=train_cfg, num_workers=num_workers)
 
 
 def _default_bench_dir():
-    return PROJECT_ROOT / 'dataset' / 'XRF55' / 'bench' / 'raw'
+    return PROJECT_ROOT / 'dataset' / 'XRF55' / 'bench' / 'raw_npy'
 
 
 def _default_output_dir(model_name: str):
