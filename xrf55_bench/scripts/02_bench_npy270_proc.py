@@ -2,7 +2,7 @@
 
 Filtering pipeline applied per sample:
     (270, 1000) → reshape (9, 1000, 30)
-    → Hampel filter (window=12, n_sigma=3.0) along time axis
+    → Hampel filter (window=8, n_sigma=3.0) along time axis
     → Butterworth LPF (4th order, cutoff 20 Hz, fs=200 Hz) along time axis
     → back to (270, 1000)
 
@@ -109,7 +109,7 @@ def _transforms(arr: np.ndarray):
     """
     # (270, 1000) → (9, 1000, 30): invert (antenna, sub, time) → (antenna, time, sub)
     x9   = arr.reshape(9, 30, 1000).transpose(0, 2, 1).astype(np.float32)
-    x9   = hampel_vectorized(x9, window=12, n_sigma=3.0)
+    x9   = hampel_vectorized(x9, window=8, n_sigma=3.0)
     x9   = sosfiltfilt(_SOS, x9, axis=1).astype(np.float32)
     flat = x9.transpose(0, 2, 1).reshape(270, 1000)   # back to (270, 1000)
 
@@ -176,7 +176,7 @@ def _compute_stats(all_files: list, npy_dir: Path) -> dict:
     stats = {
         'meta': {
             'source':     'raw_npy_270_hampel_lpf',
-            'filter':     'hampel(window=12,n_sigma=3.0) + butter(4,20Hz,fs=200Hz)',
+            'filter':     'hampel(window=8,n_sigma=3.0) + butter(4,20Hz,fs=200Hz)',
             'n_files':    len(all_files),
             'fitted_on':  'all_reps_1_to_20',
             'train_reps': TRAIN_REPS,
