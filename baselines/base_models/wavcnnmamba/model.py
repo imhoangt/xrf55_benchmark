@@ -6,44 +6,14 @@ WiFi-CSI human activity recognition on XRF55 (11 classes). A compact
 CNN + bidirectional-Mamba model (~0.75M params) operating on the amplitude
 of a 1-level 2-D DWT (subbands LL | HL | LH; HH dropped).
 
-Changes over v4 (three, all deliberate)
----------------------------------------
-  1. TFBlock — REMOVED the per-branch LayerScale gates (gamma_t, gamma_f).
-     For a depthwise conv, a per-output-channel static scalar (init=1.0)
-     folds into that channel's kernel, so the gates added zero expressivity;
-     and the LayerScale benefit requires small init on deep stacks, not
-     init=1.0 on a 3-block encoder. The pointwise conv + SE already supply
-     all the channel reweighting the block needs.
-
-  2. Configurable input channels — C_IN is derived from
-     (n_links M, n_antennas A, n_subbands) as C_IN = M * A * n_subbands
-     instead of being hard-coded to 27. Default (3,3,3) -> 27 (XRF55
-     scene_01), but A=4 -> 36, or keeping HH (n_subbands=4), now work
-     without editing the model. n_per_sub = M * A.
-
-  3. SubbandGate — a per-SAMPLE squeeze-excite gate over the DWT subbands,
-     inserted between the per-subband stems and the 1x1 cross-subband
-     projection. Because it is conditioned on the input it differs per
-     sample, so it can boost/suppress a whole subband (e.g. HL for
-     impulsive actions, LL for slow ones) — something the static proj
-     (identical weights for all samples) and the per-channel SE inside
-     TFBlocks (which runs after mixing) cannot express. ~1.2k params;
-     toggle with `use_subband_gate`.
-
-Unchanged from v4 (all sound): FreqAttnPool multi-head + identity-init
-out_proj; learned absolute positional embedding (kept behind `use_pos_emb`,
-default on — worth ablating); Vim-style bidirectional Mamba (sum fusion,
-no FFN, d_state=32); ECAPA attentive mean+std pooling; LN->MLP head with
-no input dropout; dilation schedule [1,2,4]; GroupNorm throughout.
-
 Architecture (default config: M=3, A=3, 3 subbands -> C_IN=27)
 -------------------------------------------------------------
     (B, 27, T, F2)                    27 = 9 ant-pairs × 3 subbands (LL|HL|LH)
         ▼ Encoder:
           per-subband stems  LL(7,5)/HL(3,7)/LH(7,3)  → (B, 96, T, F2)
-          SubbandGate        per-sample LL/HL/LH gate → (B, 96, T, F2)  ★v5
+          SubbandGate        per-sample LL/HL/LH gate → (B, 96, T, F2)
           1×1 proj + GN      96 → d_model             → (B, 128, T, F2)
-          TFBlock ×3         dil[1,2,4] + SE          → (B, 128, T, F2)  ★v5
+          TFBlock ×3         dil[1,2,4] + SE          → (B, 128, T, F2)
         ▼ FreqAttnPool       4-head + out_proj         → (B, T, 128)
         ▼ + PositionalEmb    learned, (1, 500, 128)    → (B, T, 128)
         ▼ BiMamba            2 layers, sum, no FFN      → (B, T, 128)
@@ -98,13 +68,6 @@ class ChannelGate(nn.Module):
     Used INSIDE each TFBlock (SE-ResNet pattern). After the encoder's 1×1
     projection the channels are no longer subband-aligned, so this performs
     generic per-channel recalibration — hence "ChannelGate", not "SubBandGate".
-
-    Init note: with trunc_normal(std=0.02) weights and zero bias the excite
-    MLP outputs ≈ 0 → Sigmoid(0) = 0.5, so gates start near 0.5 where the
-    sigmoid gradient is maximal (0.25), letting them move quickly to the
-    correct per-channel regime. Because the gate sits on the residual *delta*
-    (not the residual stream), the early 0.5 scaling only attenuates the
-    block's contribution, never the preserved stem/identity features.
 
     Parameters (d=128, r=4): Linear(128,32)=4,128 + Linear(32,128)=4,224 = 8,352
     """
@@ -193,13 +156,6 @@ class TFBlock(nn.Module):
     Parallel depthwise convolutions along time (dw_t, dilated) and frequency
     (dw_f) are summed, then mixed by a 1×1 pointwise conv. The SE gate then
     reweights channels of the block's contribution before the residual add.
-
-    Note: v4 placed learnable LayerScale gates (γ_t, γ_f, init=1.0) on the two
-    axial branches. They were removed — for a depthwise conv a per-output-
-    channel scalar folds into that channel's kernel, so at init=1.0 they add
-    no expressivity (only a no-op reparameterisation), and LayerScale's actual
-    benefit needs small init on deep stacks, not a 3-block encoder. The pw conv
-    and the SE gate already provide the channel reweighting the block needs.
 
     Dilation schedule [1, 2, 4] across the three blocks gives compound
     temporal receptive fields of 7 → 19 → 43 timesteps — local patterns
@@ -332,15 +288,9 @@ class FreqAttnPool(nn.Module):
     position; each head softmaxes over F2 independently and weights its own
     disjoint channel group of size head_dim = d_model // n_heads.
 
-    v4 ★ — Output projection (Linear(d_model, d_model), init=identity):
-        v3 used `out_heads.view(B, T, C)` as the only "concat" step. That
-        means the 4 heads operated on disjoint channel groups and their
-        outputs NEVER interacted — a degenerate form of MHA. v4 adds a
-        d×d output projection (init = eye matrix + zero bias) so:
-          • At step 0 the module is bit-exact equivalent to v3 (identity).
-          • The optimizer can subsequently learn cross-head mixing if it
-            helps; otherwise out_proj stays near identity at no cost.
-        For n_heads=1, out_proj is nn.Identity (no extra params).
+    Output projection (Linear(d_model, d_model), init=identity): adds a d×d
+    projection so heads can learn cross-head channel mixing. Init as identity
+    matrix → no-op at step 0. For n_heads=1, out_proj is nn.Identity.
 
     Param cost (d_model=128, n_heads=4):
         score    = 128 × 4 + 4   =      516
@@ -364,17 +314,12 @@ class FreqAttnPool(nn.Module):
         self.head_dim = d_model // n_heads
         self.score    = nn.Linear(d_model, n_heads)
 
-        # ── v4: output projection so heads can communicate ──────────────
-        # Init as identity → at step 0 this layer is a no-op, equivalent
-        # to v3's `out_heads.view(B, T, C)`. Optimizer may subsequently
-        # rotate / mix channels across heads if it helps the loss.
         if n_heads > 1:
             self.out_proj = nn.Linear(d_model, d_model)
-            nn.init.eye_(self.out_proj.weight)
+            nn.init.eye_(self.out_proj.weight)   # identity → no-op at step 0
             nn.init.zeros_(self.out_proj.bias)
         else:
             self.out_proj = nn.Identity()
-        # ────────────────────────────────────────────────────────────────
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, T, F2 = x.shape
@@ -386,7 +331,7 @@ class FreqAttnPool(nn.Module):
         # Weighted sum: (B, T, F2, H, 1) ⊙ (B, T, F2, H, Dh) → (B, T, H, Dh)
         out = (weights.unsqueeze(-1) * x_heads).sum(dim=2).reshape(B, T, C)
 
-        return self.out_proj(out)                            # ★v4
+        return self.out_proj(out)
 
 
 # ─── M3: Bidirectional Mamba (no FFN) ─────────────────────────────────────────
@@ -497,23 +442,10 @@ class AttnStatPool(nn.Module):
 # ─── M5: Classifier ───────────────────────────────────────────────────────────
 
 class Classifier(nn.Module):
-    """MLP head: LayerNorm → [Dropout]? → Linear → SiLU → Dropout → Linear.
-
-    v4 ★ — Default `dropout_in` changed from 0.1 → 0.0:
-        LayerNorm immediately before the first Linear already standardizes
-        features (zero mean, unit variance per channel), so dropping
-        randomly *standardized* values via Dropout(0.1) was redundant with
-        the hidden Dropout(0.2) that follows. Pattern aligns with ConvNeXt,
-        Vim, MambaVision heads — they only have one dropout, after the
-        hidden activation.
-
-        Wrapped behind `if dropout_in > 0:` so the layer is omitted
-        entirely when 0, keeping `state_dict` clean. Easy to revert by
-        passing `dropout_in=0.1` if overfit is observed empirically.
-    """
+    """MLP head: LayerNorm → [Dropout]? → Linear → SiLU → Dropout → Linear."""
 
     def __init__(self, d: int = 256, hidden: int = 128, num_classes: int = 11,
-                 dropout: float = 0.2, dropout_in: float = 0.0):   # ★v4
+                 dropout: float = 0.2, dropout_in: float = 0.0):
         super().__init__()
         layers: list[nn.Module] = [nn.LayerNorm(d)]
         if dropout_in > 0.0:
