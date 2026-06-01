@@ -1,6 +1,6 @@
 """Amplitude pipeline visualization — raw, preprocessed, and DWT stages.
 
-Reads from raw_npy/ (270, 1000) format. Displays channel 0
+Reads from raw_npy_nosc/ (270, 1000) format. Displays channel 0
 (device 1, antenna 0 — rows 0-29 of the 270-axis) across all 30 subcarriers.
 
 Sample:
@@ -18,8 +18,8 @@ Output: xrf55_bench/outputs/local_plots/
 
 Usage:
     cd har_csi
-    python xrf55_bench/scripts/03_amplitude_dwt_plots.py
-    python xrf55_bench/scripts/03_amplitude_dwt_plots.py --npy-dir D:/XRF55/raw_npy
+    python xrf55_bench/scripts/03_plot_amplitude.py
+    python xrf55_bench/scripts/03_plot_amplitude.py --npy-dir D:/XRF55/raw_npy_nosc
 """
 import argparse
 import sys
@@ -41,7 +41,7 @@ from src.data.preprocessing.amplitude import hampel_vectorized
 from src.data.preprocessing.parser    import ACTION_NAMES, ACTION_ID_TO_LABEL
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-_NPY_DIR_DEFAULT = PROJECT_ROOT / 'dataset' / 'XRF55' / 'raw_npy'
+_NPY_DIR_DEFAULT = PROJECT_ROOT / 'dataset' / 'XRF55' / 'raw_npy_nosc'
 PLOTS_DIR        = _BENCH_ROOT  / 'outputs' / 'local_plots'
 
 VOL_ID         = 1
@@ -167,6 +167,8 @@ def _plot_vs_dwt(amp: np.ndarray, amp_title: str, wavelet: str, out_path):
         vmin=None, vmax=vmax,
     )
     ax_top.set_title(f'{amp_title} before {wav_display} DWT', fontsize=14)
+    ax_top.set_xlabel('Time (frame)')
+    ax_top.set_ylabel('Subcarrier')
     plt.colorbar(im_top, ax=ax_top, fraction=0.023)
 
     bottom_axes = []
@@ -257,7 +259,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Amplitude visualization: raw, preprocessed, DWT (6 plots)')
     parser.add_argument('--npy-dir', type=str, default=None,
-                        help='Path to raw_npy/ (default: dataset/XRF55/raw_npy)')
+                        help='Path to raw_npy_nosc/ (default: dataset/XRF55/raw_npy_nosc)')
     args = parser.parse_args()
 
     d = Path(args.npy_dir) if args.npy_dir else _NPY_DIR_DEFAULT

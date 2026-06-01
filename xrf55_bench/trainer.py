@@ -274,7 +274,7 @@ def main(model_name: str, output_dir,
     if bench_dir is None:
         raise ValueError(
             'bench_dir is required (must contain stats.json). '
-            'Run 01_bench_npy270_raw.py or 02_bench_npy270_proc.py first.')
+            'Run 01_build_dataset_raw.py or 02_build_dataset_processed.py first.')
     stats = load_stats(bench_dir)
 
     # Work on a local copy so we never mutate the caller's cfg object.
@@ -497,7 +497,7 @@ def run(model_name: str, bench_dir=None,
 
 
 def _default_bench_dir():
-    return PROJECT_ROOT / 'dataset' / 'XRF55' / 'bench' / 'raw_npy'
+    return PROJECT_ROOT / 'dataset' / 'XRF55' / 'bench' / 'raw_nosc'
 
 
 def _default_output_dir(model_name: str):

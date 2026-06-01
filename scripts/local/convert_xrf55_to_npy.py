@@ -4,9 +4,7 @@ Each output file: (270, 1000) float64
   Row layout: row = dev*90 + sub*3 + ant
   (3 devices × 30 subcarriers × 3 antennas = 270 channels, 1000 time steps)
 
-NOTE: Amplitude values are ~2.39× larger than the authors' original .npy files
-because csiread and MATLAB read_bf_file apply different AGC normalization.
-The spatial/temporal structure is identical.
+No RSSI normalization — raw complex CSI amplitude (no get_scaled_csi).
 
 Usage:
     python scripts/local/convert_xrf55_to_npy.py

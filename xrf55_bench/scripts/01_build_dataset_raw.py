@@ -1,18 +1,14 @@
-"""Build XRF55 bench arrays (processed) — Hampel + Butterworth LPF before transforms.
+"""Build XRF55 bench arrays (raw) from per-sample (270, 1000) amplitude files.
 
-Filtering pipeline applied per sample:
-    (270, 1000) → reshape (9, 1000, 30)
-    → Hampel filter (window=8, n_sigma=3.0) along time axis
-    → Butterworth LPF (4th order, cutoff 20 Hz, fs=200 Hz) along time axis
-    → back to (270, 1000)
+No additional filtering — files are used as-is (raw amplitude, no RSSI normalization).
 
-Input:  dataset/XRF55/raw_npy/{vol:02d}_{action:02d}_{rep:02d}.npy  (270, 1000) float64
+Input:  dataset/XRF55/raw_npy_nosc/{vol:02d}_{action:02d}_{rep:02d}.npy  (270, 1000) float64
 
 Channel layout of the 270-axis (from read_dat.m):
     row i = antenna (i // 30) × subcarrier (i % 30)
     9 antennas = 3 RX devices × 3 antennas/device  (antenna-major, subcarrier-minor)
 
-Output: dataset/XRF55/bench/processed_npy/
+Output: dataset/XRF55/bench/raw_nosc/
     stats.json
     y_train.npy              (4620,)            int64
     y_test.npy               (1980,)            int64
@@ -32,9 +28,9 @@ Split: train = reps 1-14 (4620 samples), test = reps 15-20 (1980 samples).
 Stats fitted on all reps 1-20 (6600 files).
 
 Usage:
-    python xrf55_bench/scripts/02_bench_npy270_proc.py
-    python xrf55_bench/scripts/02_bench_npy270_proc.py --npy-dir D:/XRF55/raw_npy
-    python xrf55_bench/scripts/02_bench_npy270_proc.py --bench-dir E:/bench/processed_npy
+    python xrf55_bench/scripts/01_build_dataset_raw.py
+    python xrf55_bench/scripts/01_build_dataset_raw.py --npy-dir D:/XRF55/raw_npy_nosc
+    python xrf55_bench/scripts/01_build_dataset_raw.py --bench-dir E:/bench/raw_nosc
 """
 import argparse
 import json
@@ -43,23 +39,19 @@ from pathlib import Path
 
 import numpy as np
 import pywt
-from scipy.signal import butter, sosfiltfilt
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.preprocessing.amplitude import hampel_vectorized
-from src.data.preprocessing.dwt       import apply_dwt2_stack
-from src.data.preprocessing.parser    import ACTION_ID_TO_LABEL, ACTION_IDS_USED
+from src.data.preprocessing.dwt    import apply_dwt2_stack
+from src.data.preprocessing.parser import ACTION_ID_TO_LABEL, ACTION_IDS_USED
 
-NPY_DIR   = PROJECT_ROOT / 'dataset' / 'XRF55' / 'raw_npy'
-BENCH_DIR = PROJECT_ROOT / 'dataset' / 'XRF55' / 'bench' / 'processed_npy'
+NPY_DIR   = PROJECT_ROOT / 'dataset' / 'XRF55' / 'raw_npy_nosc'
+BENCH_DIR = PROJECT_ROOT / 'dataset' / 'XRF55' / 'bench' / 'raw_nosc'
 
-TRAIN_REPS = list(range(1, 15))
-TEST_REPS  = list(range(15, 21))
-
-_SOS = butter(4, 20.0, btype='low', fs=200.0, output='sos')
+TRAIN_REPS = list(range(1, 15))    # reps 1-14  → 4620 samples
+TEST_REPS  = list(range(15, 21))   # reps 15-20 → 1980 samples
 
 
 # ── File helpers ──────────────────────────────────────────────────────────────
@@ -100,23 +92,21 @@ def _check_files(paths: list) -> None:
 # ── Per-sample transforms ─────────────────────────────────────────────────────
 
 def _transforms(arr: np.ndarray):
-    """(270, 1000) float64 → Hampel+LPF → (flat, xh, xv, wav).
+    """(270, 1000) float64 → (flat, xh, xv, wav).
 
     flat : (270, 1000)   float32 — ResNet input
     xh   : (500, 135)    float32 — TFMamba XH  (Haar cH.T)
     xv   : (500, 135)    float32 — TFMamba XV  (Haar cV.T)
     wav  : (27, 500, 15) float32 — WavMamba    (db4 DWT)
     """
-    # (270, 1000) → (9, 1000, 30): invert (antenna, sub, time) → (antenna, time, sub)
-    x9   = arr.reshape(9, 30, 1000).transpose(0, 2, 1).astype(np.float32)
-    x9   = hampel_vectorized(x9, window=8, n_sigma=3.0)
-    x9   = sosfiltfilt(_SOS, x9, axis=1).astype(np.float32)
-    flat = x9.transpose(0, 2, 1).reshape(270, 1000)   # back to (270, 1000)
+    flat = arr.astype(np.float32)
 
     _, (cH, cV, _) = pywt.dwt2(flat, 'haar', mode='periodization')
     xh = cH.T   # (500, 135)
     xv = cV.T   # (500, 135)
 
+    # (270, 1000) → (9, 1000, 30) for db4 DWT
+    x9  = flat.reshape(9, 30, 1000).transpose(0, 2, 1)
     wav = apply_dwt2_stack(x9[None])[0]   # (27, 500, 15)
 
     return flat, xh, xv, wav
@@ -150,8 +140,8 @@ def _compute_stats(all_files: list, npy_dir: Path) -> dict:
         res_sum    += v.sum(axis=1)
         res_sum_sq += (v * v).sum(axis=1)
 
-        xh64 = xh.astype(np.float64)
-        xv64 = xv.astype(np.float64)
+        xh64 = xh.astype(np.float64)    # (500, 135) — sum axis=0 (T)
+        xv64 = xv.astype(np.float64)    # (500, 135) — sum axis=0 (T)
         xh_sum    += xh64.sum(axis=0)
         xh_sum_sq += (xh64 * xh64).sum(axis=0)
         xv_sum    += xv64.sum(axis=0)
@@ -175,8 +165,7 @@ def _compute_stats(all_files: list, npy_dir: Path) -> dict:
 
     stats = {
         'meta': {
-            'source':     'raw_npy_270_hampel_lpf',
-            'filter':     'hampel(window=8,n_sigma=3.0) + butter(4,20Hz,fs=200Hz)',
+            'source':     'raw_npy_nosc_270',
             'n_files':    len(all_files),
             'fitted_on':  'all_reps_1_to_20',
             'train_reps': TRAIN_REPS,
@@ -226,7 +215,7 @@ def _save_split(split_name: str, rep_list: list,
     print(f'  Output: {total_gb:.2f} GB (memory-mapped)')
 
     for i, (fpath, label) in enumerate(
-            tqdm(samples, desc='  Filter+transform', unit='file')):
+            tqdm(samples, desc='  Transform', unit='file')):
         flat, xh, xv, wav = _transforms(np.load(fpath))
         X_resnet[i] = flat
         X_xh[i]     = xh
@@ -247,11 +236,11 @@ def _save_split(split_name: str, rep_list: list,
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(
-        description='Build bench/processed_npy arrays — Hampel+LPF filtered')
+        description='Build bench/raw_nosc arrays from (270,1000) raw_npy_nosc files')
     ap.add_argument('--npy-dir',   type=str, default=None,
-                    help='Input raw_npy/ dir  (default: dataset/XRF55/raw_npy)')
+                    help='Input dir  (default: dataset/XRF55/raw_npy_nosc)')
     ap.add_argument('--bench-dir', type=str, default=None,
-                    help='Output dir  (default: dataset/XRF55/bench/processed_npy)')
+                    help='Output dir  (default: dataset/XRF55/bench/raw_nosc)')
     args = ap.parse_args()
 
     npy_dir   = Path(args.npy_dir)   if args.npy_dir   else NPY_DIR

@@ -1,7 +1,7 @@
 """Dataset loaders for the XRF55 benchmark.
 
-Loads pre-built bench arrays from bench/raw_npy/ or bench/processed_npy/.
-Build these with 01_bench_npy270_raw.py (raw) or 02_bench_npy270_proc.py (proc).
+Loads pre-built bench arrays from bench/raw_nosc/ or bench/processed_nosc/.
+Build these with 01_build_dataset_raw.py (raw) or 02_build_dataset_processed.py (processed).
 
 Split: train=reps 1-14 (4620 samples), test=reps 15-20 (1980 samples). No val.
 
@@ -34,8 +34,8 @@ def load_stats(bench_dir) -> dict:
 def infer_data_mode(stats: dict) -> str:
     """Infer 'proc' | 'raw' from stats.json meta.
 
-    Processed stats (02_bench_npy270_proc.py) carry a 'filter' key and
-    meta.source='raw_npy_270_hampel_lpf'.  Raw stats (01_bench_npy270_raw.py)
+    Processed stats (02_build_dataset_processed.py) carry a 'filter' key and
+    meta.source='raw_npy_270_hampel_lpf'.  Raw stats (01_build_dataset_raw.py)
     use meta.source='raw_npy_270' with no filter key.
     """
     meta = stats.get('meta', {})
@@ -142,7 +142,7 @@ def build_loaders(model_name: str, stats: dict, bench_dir,
     Args:
         model_name : 'resnet', 'tfmamba', or 'wavmamba'
         stats      : dict from load_stats(bench_dir)
-        bench_dir  : path to bench/raw_npy/ or bench/processed_npy/
+        bench_dir  : path to bench/raw_nosc/ or bench/processed_nosc/
     """
     if model_name not in _PREPROC_DS:
         raise ValueError(f"Unknown model '{model_name}'. Choose from: {list(_PREPROC_DS)}")
@@ -152,7 +152,7 @@ def build_loaders(model_name: str, stats: dict, bench_dir,
     if not sentinel.exists():
         raise FileNotFoundError(
             f'Bench arrays not found: {sentinel}\n'
-            'Run 01_bench_npy270_raw.py or 02_bench_npy270_proc.py first.')
+            'Run 01_build_dataset_raw.py or 02_build_dataset_processed.py first.')
 
     data_label = ('Processed CSI Amplitude (Hampel + Butterworth LPF)'
                   if infer_data_mode(stats) == 'proc' else 'Raw CSI Amplitude')

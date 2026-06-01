@@ -42,75 +42,24 @@ def _apply_perm_correction(csi, perm, fpath):
     return csi_phys
 
 
-def _dbinv(x: np.ndarray) -> np.ndarray:
-    return np.power(10.0, x / 10.0)
-
-
-def _get_scaled_csi(cd) -> np.ndarray:
-    """Port of MATLAB get_scaled_csi.m + get_total_rss.m (Halperin 2011).
-
-    Vectorized over N packets. Matches exactly:
-      scale  = RSSI_pwr / (csi_pwr / 30)
-      H      = csi * sqrt(scale / (thermal_noise + scale*Nrx*Ntx))
-    where RSSI_pwr comes from get_total_rss:
-      rss    = 10*log10(Σ 10^(rssi_x/10)) - 44 - agc   [dBm, non-zero antennae only]
-
-    Returns: complex128 (N, 30, Nrx, Ntx) in units of sqrt(SNR).
-    """
-    csi  = cd.csi.astype(np.complex128)          # (N, 30, Nrx, Ntx)
-    Nrx  = int(cd.Nrx)
-    Ntx  = int(cd.Ntx)
-
-    # ── get_total_rss (vectorized) ────────────────────────────────────────────
-    rssi_a = cd.rssi_a.astype(np.float64)
-    rssi_b = cd.rssi_b.astype(np.float64)
-    rssi_c = cd.rssi_c.astype(np.float64)
-    agc    = cd.agc.astype(np.float64)
-    rssi_mag = (np.where(rssi_a != 0, _dbinv(rssi_a), 0.0)
-              + np.where(rssi_b != 0, _dbinv(rssi_b), 0.0)
-              + np.where(rssi_c != 0, _dbinv(rssi_c), 0.0))   # (N,) linear
-    total_rss = 10.0 * np.log10(rssi_mag) - 44.0 - agc        # (N,) dBm
-    rssi_pwr  = _dbinv(total_rss)                              # (N,) mW
-
-    # ── get_scaled_csi ────────────────────────────────────────────────────────
-    csi_pwr  = np.sum(np.abs(csi) ** 2, axis=(1, 2, 3))       # (N,)
-    scale    = rssi_pwr / (csi_pwr / 30.0)                    # (N,)
-
-    noise_db          = np.where(cd.noise == -127, -92.0,
-                                 cd.noise.astype(np.float64))  # (N,)
-    total_noise_pwr   = _dbinv(noise_db) + scale * (Nrx * Ntx) # (N,)
-
-    ret = csi * np.sqrt(scale / total_noise_pwr)[:, None, None, None]
-
-    # Ntx correction (Intel approximates sqrt(3) as sqrt(10^(4.5/10)))
-    if Ntx == 2:
-        ret *= np.sqrt(2.0)
-    elif Ntx == 3:
-        ret *= np.sqrt(_dbinv(4.5))
-
-    return ret
-
-
 def parse_xrf55_dat(fpath):
-    """Parse one .dat file, apply get_scaled_csi (RSSI/noise scaling), perm correction.
+    """Parse one .dat file, apply antenna permutation correction.
 
-    Matches MATLAB pipeline:
-      read_bf_file → get_scaled_csi → abs → ant_csi
+    No RSSI normalization — returns raw complex CSI.
 
-    Returns: csi_scaled (1000, 30, 3) complex128, units sqrt(SNR).
+    Returns: (1000, 30, 3) complex128
     """
     if not _CSIREAD_OK:
         raise ImportError('csiread not installed. Run: pip install csiread')
     cd = csiread.Intel(str(fpath), nrxnum=3, ntxnum=1, pl_size=0, if_report=False)
     cd.read()
 
-    csi  = _get_scaled_csi(cd)[:, :, :, 0]   # (1000, 30, 3) complex128
-    perm = cd.perm
+    csi = cd.csi[:, :, :, 0].astype(np.complex128)   # (1000, 30, 3), drop Ntx dim
 
     assert csi.shape == (1000, 30, 3)
     assert np.isfinite(np.abs(csi)).all()
 
-    return _apply_perm_correction(csi, perm, fpath)
+    return _apply_perm_correction(csi, cd.perm, fpath)
 
 
 def parse_xrf55_mat(fpath):
