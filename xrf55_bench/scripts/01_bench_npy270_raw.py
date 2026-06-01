@@ -180,7 +180,7 @@ def _compute_stats(all_files: list, npy_dir: Path) -> dict:
 
     print(f'  resnet  : mean[0]={resnet_mean[0]:.5f}  std[0]={resnet_std[0]:.5f}')
     print(f'  tfmamba : xh_mean[0]={xh_mean[0]:.5f}  xh_std[0]={xh_std[0]:.5f}')
-    print(f'  wavmamba: mean[0]={wav_mean[0]:.5f}  std[0]={wav_std[0]:.5f}')
+    print(f'  wavmamba: mean[0,0]={wav_mean[0][0]:.5f}  std[0,0]={wav_std[0][0]:.5f}')
     return stats
 
 

@@ -374,10 +374,6 @@ def main(model_name: str, output_dir,
                 # Overwrite every epoch — last_model.pt always = last completed epoch
                 torch.save(model.state_dict(), seed_dir / 'last_model.pt')
 
-                if cfg.protocol == '01' and avg_loss < 0.01:
-                    print(f'  Early stop: train_loss={avg_loss:.6f} < 0.01')
-                    break
-
         except KeyboardInterrupt:
             _interrupted = True
 
