@@ -249,7 +249,7 @@ def main(model_name: str, output_dir,
          cfg: TrainCfg = None,
          num_workers: int = 4):
     if cfg is None:
-        cfg = TrainCfg_for_protocol('01')
+        cfg = TrainCfg_for_protocol('03')
     if not cfg.seeds:
         raise ValueError('cfg.seeds is empty — provide at least one seed.')
     if model_name not in _MODEL_NAMES:

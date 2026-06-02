@@ -6,7 +6,7 @@ from typing import Optional
 
 @dataclass
 class TrainCfg:
-    protocol:         str            = '01'    # '01' | '02' | '03'
+    protocol:         str            = '03'    # '01' | '02' | '03'
 
     # Hyperparameters
     lr:               float          = 1e-3
@@ -31,7 +31,7 @@ class TrainCfg:
     label_smoothing:  float          = 0.0
 
     # Data mode: 'raw' | 'proc' | None (None = auto-infer from stats.json meta)
-    data_mode:        Optional[str]  = None
+    data_mode:        Optional[str]  = 'raw'
 
     # Seeds — (42,) single default, (4, 8, 17, 42) multi
     seeds:            tuple          = (42,)
