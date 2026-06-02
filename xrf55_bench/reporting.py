@@ -6,6 +6,7 @@ e.g. to regenerate plots from saved training_log.csv without re-running training
 import dataclasses
 import json
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -144,12 +145,25 @@ def _plot_seed_comparison(per_seed_results: dict, plots_dir: Path, title: str):
 
 def save_combined_zip(output_dir: Path, model_name: str,
                       data_mode: str, protocol: str, seeds) -> Path:
-    """Single zip named {model}_{data_mode}_{protocol}.zip with two folders:
+    """Single zip named {model}_{data_mode}_{protocol}_{MMDD_HHMM}.zip.
+
+    Folder layout:
       results_summary/  — metrics, plots, logs, predictions (no weights)
       model/            — last_model.pt + best_model.pt per seed (stored uncompressed)
+
+    Retention: keeps the 2 most-recent zips of the same base name so that at
+    most 3 zips (2 old + 1 new) coexist on disk at any time.
     """
-    zip_name = f'{model_name}_{data_mode}_{protocol}'
-    zip_path = output_dir / f'{zip_name}.zip'
+    zip_base = f'{model_name}_{data_mode}_{protocol}'
+
+    # Retain only the 2 newest existing zips; delete the rest
+    old_zips = sorted(output_dir.glob(f'{zip_base}_*.zip'),
+                      key=lambda p: p.stat().st_mtime)
+    for old in old_zips[:-2]:
+        old.unlink()
+
+    ts       = datetime.now().strftime('%m%d_%H%M')
+    zip_path = output_dir / f'{zip_base}_{ts}.zip'
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         # results_summary/
         p = output_dir / 'metrics.json'
