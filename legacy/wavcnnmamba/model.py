@@ -11,9 +11,11 @@ Architecture (default config: M=3, A=3, 3 subbands -> C_IN=27)
     (B, 27, T, F2)                    27 = 9 ant-pairs × 3 subbands (LL|HL|LH)
         ▼ Encoder:
           per-subband stems  LL(7,5)/HL(3,7)/LH(7,3)  → (B, 96, T, F2)
+          SubbandGate        per-sample LL/HL/LH gate → (B, 96, T, F2)
           1×1 proj + GN      96 → d_model             → (B, 128, T, F2)
-          TFBlock ×3         dil[1,2,4]               → (B, 128, T, F2)
+          TFBlock ×3         dil[1,2,4] + SE          → (B, 128, T, F2)
         ▼ FreqAttnPool       4-head + out_proj         → (B, T, 128)
+        ▼ + PositionalEmb    learned, (1, 500, 128)    → (B, T, 128)
         ▼ BiMamba            2 layers, sum, no FFN      → (B, T, 128)
         ▼ AttnStatPool       ECAPA mean+std             → (B, 256)
         ▼ Classifier         LN → MLP (no input drop)   → (B, 11)
@@ -54,24 +56,115 @@ class DropPath(nn.Module):
         return x * x.new_empty(shape).bernoulli_(keep).div_(keep)
 
 
+# ─── Channel attention (Squeeze-and-Excite) ───────────────────────────────────
+
+class ChannelGate(nn.Module):
+    """Squeeze-and-Excite channel recalibration for 2-D feature maps.
+
+    Squeeze : global average pool over (T, F) → one statistic per channel.
+    Excite  : Linear(d, d/r) → SiLU → Linear(d/r, d) → Sigmoid → gates ∈ (0,1).
+    Scale   : x ← x ⊙ gates  (broadcast over T, F).
+
+    Used INSIDE each TFBlock (SE-ResNet pattern). After the encoder's 1×1
+    projection the channels are no longer subband-aligned, so this performs
+    generic per-channel recalibration — hence "ChannelGate", not "SubBandGate".
+
+    Parameters (d=128, r=4): Linear(128,32)=4,128 + Linear(32,128)=4,224 = 8,352
+    """
+
+    def __init__(self, d: int = 128, reduction: int = 4):
+        super().__init__()
+        hidden = max(8, d // reduction)
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.excite = nn.Sequential(
+            nn.Flatten(1),                       # (B, d, 1, 1) → (B, d)
+            nn.Linear(d, hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, d),
+            nn.Sigmoid(),                        # independent gates ∈ (0, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:   # (B, d, T, F2)
+        w = self.excite(self.squeeze(x))                   # (B, d)
+        return x * w.unsqueeze(-1).unsqueeze(-1)           # (B, d, T, F2)
+
+
+# ─── Cross-subband reweighting gate ───────────────────────────────────────────
+
+class SubbandGate(nn.Module):
+    """Per-sample Squeeze-and-Excite gate over the DWT subbands.
+
+    Applied to the concatenated stem outputs (B, n_subbands*d_sub, T, F2)
+    BEFORE the 1×1 cross-subband projection, so each scalar gate maps to
+    exactly one subband (LL / HL / LH):
+
+        squeeze : global avg pool over (T, F2)  → (B, n_subbands*d_sub)
+        excite  : Linear → SiLU → Linear(→ n_subbands) → Sigmoid → gates
+        scale   : multiply each subband's d_sub-channel block by its gate.
+
+    Why it is NOT redundant with the downstream projection or the SE inside
+    TFBlock: the gate is conditioned on the input, so it differs per sample
+    and can boost/suppress a whole subband per sample (e.g. HL for impulsive
+    actions, LL for slow ones). The 1×1 proj applies identical weights to
+    every sample, and the per-channel SE in TFBlock runs AFTER subbands are
+    mixed (no subband boundary left), so neither can express this.
+
+    Init: the final Linear's bias is zeroed → gates start at Sigmoid(0)=0.5
+    (a uniform 0.5 scaling, not a literal no-op; the following projection
+    absorbs the constant factor during training).
+
+    Params (n_subbands=3, d_sub=32): ≈ 1.2 K.
+
+    Input  : (B, n_subbands*d_sub, T, F2)
+    Output : same shape, subband blocks rescaled.
+    """
+
+    def __init__(self, n_subbands: int = 3, d_sub: int = 32):
+        super().__init__()
+        self.n_subbands = n_subbands
+        self.d_sub      = d_sub
+        hidden = max(n_subbands, (n_subbands * d_sub) // 8)
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.fc1     = nn.Linear(n_subbands * d_sub, hidden)
+        self.act     = nn.SiLU()
+        self.fc2     = nn.Linear(hidden, n_subbands)
+        nn.init.zeros_(self.fc2.bias)                # gates ≈ 0.5 at init
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, n*d_sub, T, F2)
+        B, C, T, F2 = x.shape
+        s = self.squeeze(x).flatten(1)                   # (B, n*d_sub)
+        g = self.sigmoid(self.fc2(self.act(self.fc1(s)))) # (B, n_subbands)
+        x = x.view(B, self.n_subbands, self.d_sub, T, F2)
+        x = x * g.view(B, self.n_subbands, 1, 1, 1)      # per-subband scaling
+        return x.reshape(B, C, T, F2)
+
+
 # ─── M1: Encoder ──────────────────────────────────────────────────────────────
 
 class TFBlock(nn.Module):
-    """Pre-norm axial-depthwise block for 2-D (time × freq) feature maps.
+    """Pre-norm axial-depthwise block for 2-D (time × freq) feature maps,
+    with an SE ChannelGate on the residual branch (SE-ResNet pattern).
 
     Flow (Pre-GroupNorm, single residual sub-block):
         y = GroupNorm(x)
-        y = dw_t(y) + dw_f(y)   # parallel axial depthwise mixing
-        y = pw(SiLU(y))          # pointwise channel projection
-        out = x + DropPath(y)    # residual
+        y = dw_t(y) + dw_f(y)                  # parallel axial depthwise mixing
+        y = pw(SiLU(y))                        # pointwise channel projection
+        y = ChannelGate(y)                     # SE channel recalibration
+        out = x + DropPath(y)                  # residual
+
+    Parallel depthwise convolutions along time (dw_t, dilated) and frequency
+    (dw_f) are summed, then mixed by a 1×1 pointwise conv. The SE gate then
+    reweights channels of the block's contribution before the residual add.
 
     Dilation schedule [1, 2, 4] across the three blocks gives compound
-    temporal receptive fields of 7 → 19 → 43 timesteps — local context
-    before BiMamba handles long-range temporal dependencies.
+    temporal receptive fields of 7 → 19 → 43 timesteps — local patterns
+    suited for T=500 before BiMamba handles long-range dependencies.
     """
 
     def __init__(self, d: int = 128, k_t: int = 7, k_f: int = 3,
-                 dilation: int = 1, drop_path: float = 0.0):
+                 dilation: int = 1, drop_path: float = 0.0,
+                 se_reduction: int = 4):
         super().__init__()
         self.norm = nn.GroupNorm(8, d)
         self.dw_t = nn.Conv2d(d, d, (k_t, 1),
@@ -80,17 +173,19 @@ class TFBlock(nn.Module):
         self.dw_f = nn.Conv2d(d, d, (1, k_f), padding=(0, k_f // 2), groups=d)
         self.act  = nn.SiLU()
         self.pw   = nn.Conv2d(d, d, 1)
+        self.gate = ChannelGate(d, reduction=se_reduction)   # SE on the delta
         self.dp   = DropPath(drop_path)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.norm(x)
-        y = self.dw_t(y) + self.dw_f(y)
-        y = self.pw(self.act(y))
+        y = self.dw_t(y) + self.dw_f(y)     # parallel axial mixing
+        y = self.pw(self.act(y))            # channel projection
+        y = self.gate(y)                    # SE channel recalibration
         return x + self.dp(y)
 
 
 class Encoder(nn.Module):
-    """Per-subband stems → 1×1 cross-subband proj → TFBlocks.
+    """Per-subband stems → SubbandGate → 1×1 cross-subband proj → TFBlocks.
 
     Channel layout is subband-major (MUST match data pipeline); with
     n_per_sub = M·A antenna pairs per subband, for the default M=3, A=3,
@@ -108,8 +203,9 @@ class Encoder(nn.Module):
 
     Flow:
         cat(stem_i(subband_i))  → (B, n_subbands*d_subband, T, F2)
+            ↓ SubbandGate       per-sample subband reweighting
             ↓ 1×1 proj + GN     cross-subband channel mixing (→ d_model)
-            ↓ TFBlocks ×3       multi-scale spatio-temporal
+            ↓ TFBlocks ×3       multi-scale spatio-temporal + SE
 
     Input : (B, n_per_sub*n_subbands, T, F2)
     Output: (B, d_model, T, F2)
@@ -122,6 +218,8 @@ class Encoder(nn.Module):
                  d_subband: int = 32, d_model: int = 128,
                  dilations: tuple = (1, 2, 4),
                  drop_path_rates: tuple = (0.0, 0.05, 0.10),
+                 se_reduction: int = 4,
+                 use_subband_gate: bool = True,
                  stem_kernels: tuple = None):
         super().__init__()
         if len(dilations) != len(drop_path_rates):
@@ -153,6 +251,10 @@ class Encoder(nn.Module):
             for (kt, kf) in stem_kernels
         ])
 
+        # Per-sample cross-subband reweighting before channel mixing
+        self.subband_gate = (SubbandGate(n_subbands, d_subband)
+                             if use_subband_gate else nn.Identity())
+
         # Cross-subband channel mixing (n_subbands*d_subband → d_model)
         self.proj = nn.Sequential(
             nn.Conv2d(d_cat, d_model, 1),
@@ -162,7 +264,7 @@ class Encoder(nn.Module):
 
         self.blocks = nn.ModuleList([
             TFBlock(d_model, dilation=dilations[i],
-                    drop_path=drop_path_rates[i])
+                    drop_path=drop_path_rates[i], se_reduction=se_reduction)
             for i in range(len(dilations))
         ])
 
@@ -170,6 +272,7 @@ class Encoder(nn.Module):
         subbands = x.chunk(self.n_subbands, dim=1)   # subband-major split
         f = torch.cat([stem(sb) for stem, sb in zip(self.stems, subbands)],
                       dim=1)                          # (B, n_sub*d_sub, T, F2)
+        f = self.subband_gate(f)                      # per-sample subband gates
         f = self.proj(f)                              # (B, d_model, T, F2)
         for blk in self.blocks:
             f = blk(f)
@@ -372,8 +475,12 @@ class WavMambaHAR(nn.Module):
     Output : logits  (B, num_classes)
 
     Learned absolute positional embedding (shape (1, T_MAX, d_model)):
-        Optional, default OFF. Mamba already encodes position via the recurrent
-        state; PE adds 64K params with uncertain benefit on small datasets.
+        A learned 1-D PE is added once, after FreqAttnPool and before BiMamba.
+        Whether an SSM needs a PE is contested (Vim adds one; Vim-F argues a
+        recurrent SSM fed in fixed order does not need it), and this model
+        already has a convolutional encoder that leaks some absolute position.
+        It is kept behind `use_pos_emb` (default True) and is worth ABLATING —
+        it costs T_MAX·d_model = 500·128 = 64,000 params (~8.5% of the model).
         For T ≤ T_MAX we slice the buffer; for T > T_MAX we interpolate.
 
     Args:
@@ -386,9 +493,11 @@ class WavMambaHAR(nn.Module):
         d_state           : Mamba SSM state size (default 32 for T=500).
         n_mamba_layers    : number of BiMamba layers (default 2).
         n_freq_attn_heads : heads in FreqAttnPool (default 4; 1 = single-head).
+        se_reduction      : SE bottleneck reduction inside TFBlocks (default 4).
         dp_cnn            : DropPath rates for the 3 TFBlocks.
         dp_mamba          : DropPath rates for the BiMamba layers.
-        use_pos_emb       : add learned positional embedding (default False).
+        use_pos_emb       : add learned positional embedding (default True).
+        use_subband_gate  : per-sample DWT-subband SE gate (default True).
         stem_kernels      : optional per-subband (k_t, k_f) tuples.
     """
 
@@ -406,9 +515,11 @@ class WavMambaHAR(nn.Module):
         d_state:            int   = 32,
         n_mamba_layers:     int   = 2,
         n_freq_attn_heads:  int   = 4,
+        se_reduction:       int   = 4,
         dp_cnn:             tuple = (0.0, 0.05, 0.10),
         dp_mamba:           tuple = (0.0, 0.05),
-        use_pos_emb:        bool  = False,
+        use_pos_emb:        bool  = True,
+        use_subband_gate:   bool  = True,
         stem_kernels:       tuple = None,
     ):
         super().__init__()
@@ -434,6 +545,8 @@ class WavMambaHAR(nn.Module):
             d_subband=d_subband,
             d_model=d_model,
             drop_path_rates=dp_cnn,
+            se_reduction=se_reduction,
+            use_subband_gate=use_subband_gate,
             stem_kernels=stem_kernels,
         )
         self.fpool = FreqAttnPool(d_model, n_heads=n_freq_attn_heads)
