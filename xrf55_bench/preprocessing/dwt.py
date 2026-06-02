@@ -14,6 +14,13 @@ def apply_dwt2_stack(X, wavelet='db4', mode='periodization'):
         cV → LH  (low-pass time  × high-pass freq — PyWavelets "vertical")
         cD → HH  (diagonal detail) — DROPPED
 
+    NOTE — this LL/HL/LH naming holds ONLY for this WavMamba path, where the
+    last two axes are (time=1000, freq=30). It does NOT describe the TF-Mamba
+    path: there dwt2 is applied directly to the flat (channel=270, time=1000)
+    matrix (axes swapped), so its cH/cV are detail along the channel and time
+    axes respectively — a different decomposition. The two are independent and
+    each is internally consistent; don't read this mapping into the TF-Mamba XH/XV.
+
     Vectorized via axes=(-2,-1): one PyWavelets call over all (B,C) samples,
     avoiding the Python-level B*C loop (≥10× faster on large batches).
     """

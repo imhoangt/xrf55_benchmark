@@ -10,8 +10,8 @@ Generates 6 plots:
   plot1_single_subcarrier_raw_vs_proc.png   1D: raw vs Hampel+Butterworth LPF, subcarrier 10/30
   plot2_all_subcarriers_raw_vs_proc.png     2D: raw vs Hampel+Butterworth LPF, all 30 subcarriers
   plot3_raw_vs_raw_dwt_haar.png             top: raw  /  bottom: 4 DWT-Haar subbands
-  plot4_raw_vs_raw_dwt_db4.png              top: raw  /  bottom: 4 DWT-db4  subbands
-  plot5_proc_vs_proc_dwt_haar.png           top: proc /  bottom: 4 DWT-Haar subbands
+  plot4_proc_vs_proc_dwt_haar.png           top: proc /  bottom: 4 DWT-Haar subbands
+  plot5_raw_vs_raw_dwt_db4.png              top: raw  /  bottom: 4 DWT-db4  subbands
   plot6_proc_vs_proc_dwt_db4.png            top: proc /  bottom: 4 DWT-db4  subbands
 
 Output: xrf55_bench/outputs/local_plots/
@@ -37,8 +37,8 @@ import numpy as np
 import pywt
 from scipy.signal import butter, sosfiltfilt
 
-from src.data.preprocessing.amplitude import hampel_vectorized
-from src.data.preprocessing.parser    import ACTION_NAMES, ACTION_ID_TO_LABEL
+from xrf55_bench.preprocessing.amplitude import hampel_vectorized
+from xrf55_bench.preprocessing.parser    import ACTION_NAMES, ACTION_ID_TO_LABEL
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 _NPY_DIR_DEFAULT = PROJECT_ROOT / 'dataset' / 'XRF55' / 'raw_npy_nosc'
@@ -107,7 +107,7 @@ def _heatmap(ax, data: np.ndarray, title: str,
     return im
 
 
-# ── Plot 1: 1D, single subcarrier ────────────────────────────────���────────────
+# ── Plot 1: 1D, single subcarrier ──────────────────────────────────────────────
 
 def plot1_single_subcarrier(raw, filt, out_path):
     sc = VIZ_SUBCARRIER
@@ -202,11 +202,11 @@ def _plot_vs_dwt(amp: np.ndarray, amp_title: str, wavelet: str, out_path):
 def plot3_raw_vs_raw_haar(raw, out_path):
     _plot_vs_dwt(raw,  'Raw CSI Amplitude',       'haar', out_path)
 
-def plot4_raw_vs_raw_db4(raw, out_path):
-    _plot_vs_dwt(raw,  'Raw CSI Amplitude',       'db4',  out_path)
-
-def plot5_proc_vs_proc_haar(filt, out_path):
+def plot4_proc_vs_proc_haar(filt, out_path):
     _plot_vs_dwt(filt, 'Processed CSI Amplitude', 'haar', out_path)
+
+def plot5_raw_vs_raw_db4(raw, out_path):
+    _plot_vs_dwt(raw,  'Raw CSI Amplitude',       'db4',  out_path)
 
 def plot6_proc_vs_proc_db4(filt, out_path):
     _plot_vs_dwt(filt, 'Processed CSI Amplitude', 'db4',  out_path)
@@ -243,11 +243,11 @@ def main(npy_dir: Path):
     plot3_raw_vs_raw_haar(raw, PLOTS_DIR / 'plot3_raw_vs_raw_dwt_haar.png')
     print('Plot 3: raw + DWT-Haar (4 subbands)')
 
-    plot4_raw_vs_raw_db4(raw, PLOTS_DIR / 'plot4_raw_vs_raw_dwt_db4.png')
-    print('Plot 4: raw + DWT-db4  (4 subbands)')
+    plot4_proc_vs_proc_haar(filt, PLOTS_DIR / 'plot4_proc_vs_proc_dwt_haar.png')
+    print('Plot 4: preprocessed + DWT-Haar (4 subbands)')
 
-    plot5_proc_vs_proc_haar(filt, PLOTS_DIR / 'plot5_proc_vs_proc_dwt_haar.png')
-    print('Plot 5: preprocessed + DWT-Haar (4 subbands)')
+    plot5_raw_vs_raw_db4(raw, PLOTS_DIR / 'plot5_raw_vs_raw_dwt_db4.png')
+    print('Plot 5: raw + DWT-db4  (4 subbands)')
 
     plot6_proc_vs_proc_db4(filt, PLOTS_DIR / 'plot6_proc_vs_proc_dwt_db4.png')
     print('Plot 6: preprocessed + DWT-db4  (4 subbands)')
@@ -266,5 +266,5 @@ if __name__ == '__main__':
     if not d.is_absolute():
         d = PROJECT_ROOT / d
     if not d.exists():
-        raise FileNotFoundError(f'raw_npy not found: {d}')
+        raise FileNotFoundError(f'raw_npy_nosc not found: {d}')
     main(d)

@@ -40,21 +40,21 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import (
-    CosineAnnealingLR, LambdaLR, MultiStepLR, StepLR,
+    CosineAnnealingLR, LambdaLR, MultiStepLR,
 )
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.preprocessing.parser import ACTION_NAMES
+from xrf55_bench.preprocessing.parser import ACTION_NAMES
 from xrf55_bench.config    import TrainCfg, TrainCfg_for_protocol
 from xrf55_bench.dataset   import build_loaders, load_stats, infer_data_mode
 from xrf55_bench.reporting import (
     _plot_training_curve, _plot_confusion_matrix, _plot_seed_comparison,
     save_combined_zip, build_metrics, save_metrics,
 )
-from src.training.amp_utils   import torch_load_checkpoint
-from src.training.train_utils import configure_speed_mode, set_seed
+from xrf55_bench.utils.amp_utils   import torch_load_checkpoint
+from xrf55_bench.utils.train_utils import configure_speed_mode, set_seed
 
 
 # ── Model configs ─────────────────────────────────────────────────────────────
@@ -64,23 +64,25 @@ _MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba']
 
 
 def _get_model_cfg(model_name: str) -> dict:
-    """Return model config dict with lazy-loaded imports."""
+    """Return model config dict with lazy-loaded model imports.
+
+    eval/efficiency are the unified helpers in utils.eval (1- and 2-stream aware).
+    input_shapes lists each forward argument's shape (no batch dim).
+    """
+    from xrf55_bench.utils.eval import evaluate, evaluate_full, measure_efficiency
+
     if model_name == 'resnet':
-        from baselines.base_models.resnet1d_base.model import resnet18
-        from baselines.base_models.resnet1d_base.train_utils import (
-            evaluate, evaluate_full, measure_efficiency)
+        from xrf55_bench.models.resnet1d.model import resnet18
         return dict(
             factory      = lambda: resnet18(inchannel=270, num_classes=NUM_CLASSES),
             title        = 'ResNet18-1D',
             is_2stream   = False,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
-            meas_fn      = lambda m, d: measure_efficiency(m, d, x_shape=(270, 1000)),
+            meas_fn      = lambda m, d: measure_efficiency(m, d, ((270, 1000),)),
         )
     if model_name == 'tfmamba':
-        from baselines.base_models.tf_mamba_base.model import TFMamba
-        from baselines.base_models.tf_mamba_base.train_utils import (
-            evaluate, evaluate_full, measure_efficiency)
+        from xrf55_bench.models.tf_mamba.model import TFMamba
         return dict(
             factory      = lambda: TFMamba(
                 num_features=135, d_model=64, num_layers=3,
@@ -90,20 +92,17 @@ def _get_model_cfg(model_name: str) -> dict:
             is_2stream   = True,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
-            meas_fn      = lambda m, d: measure_efficiency(
-                m, d, xh_shape=(500, 135), xv_shape=(500, 135)),
+            meas_fn      = lambda m, d: measure_efficiency(m, d, ((500, 135), (500, 135))),
         )
     if model_name == 'wavmamba':
-        from baselines.base_models.wavcnnmamba.model import WavMambaHAR
-        from baselines.base_models.resnet1d_base.train_utils import (
-            evaluate, evaluate_full, measure_efficiency)
+        from xrf55_bench.models.wavcnnmamba.model import WavMambaHAR
         return dict(
             factory      = lambda: WavMambaHAR(num_classes=NUM_CLASSES),
             title        = 'WavMambaHAR',
             is_2stream   = False,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
-            meas_fn      = lambda m, d: measure_efficiency(m, d, x_shape=(27, 500, 15)),
+            meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
         )
     raise ValueError(f"Unknown model '{model_name}'. Choose from: {_MODEL_NAMES}")
 
@@ -122,9 +121,13 @@ def _build_no_decay_set(model: nn.Module) -> set:
     Three categories:
       - All params of norm layers (weight/bias): LayerNorm, BatchNorm, GroupNorm,
         and custom RMSNorm (WavMamba) — detected by module type, not by name.
-      - Mamba SSM structural params matched by substring: A_log, D.
+      - Mamba SSM structural params: A_log, D.
       - Learnable positional embedding: pos_emb (WavMamba).
       - All bias params.
+
+    Matched by leaf name (last dotted component), not substring: 'D' as a
+    substring would spuriously match any param name containing a capital D;
+    leaf-name equality matches only the actual Mamba `.D` parameter.
     """
     no_decay: set = set()
     for mn, m in model.named_modules():
@@ -133,7 +136,7 @@ def _build_no_decay_set(model: nn.Module) -> set:
             for pn, _ in m.named_parameters(recurse=False):
                 no_decay.add(f'{mn}.{pn}' if mn else pn)
     for pn, _ in model.named_parameters():
-        if any(k in pn for k in _NO_DECAY_KEYS):
+        if pn.split('.')[-1] in _NO_DECAY_KEYS:
             no_decay.add(pn)
     return no_decay
 
@@ -172,10 +175,6 @@ def _make_scheduler(optimizer, cfg: TrainCfg):
         return CosineAnnealingLR(optimizer,
                                   T_max=kw.get('T_max', cfg.num_epochs),
                                   eta_min=kw.get('eta_min', cfg.floor_lr))
-    if cfg.scheduler == 'step':
-        return StepLR(optimizer,
-                      step_size=kw.get('step_size', 10),
-                      gamma=kw.get('gamma', 0.1))
     if cfg.scheduler == 'multistep':
         return MultiStepLR(optimizer,
                            milestones=kw.get('milestones', [40, 80, 120, 160]),

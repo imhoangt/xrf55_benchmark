@@ -35,7 +35,7 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.preprocessing.parser import (
+from xrf55_bench.preprocessing.parser import (
     ACTION_IDS_USED,
     load_xrf55_sample,
 )

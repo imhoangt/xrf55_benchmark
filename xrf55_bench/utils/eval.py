@@ -1,4 +1,9 @@
-"""Shared training utilities for all TF-Mamba baselines."""
+"""Unified evaluation + efficiency probe for all XRF55-bench models.
+
+Works for single-stream models (loader yields (X, y)) and dual-stream models
+(loader yields (XH, XV, y)) via generic `*inputs, y` unpacking — no per-model
+variant needed. Used by trainer.py for resnet / tfmamba / wavmamba alike.
+"""
 import tempfile
 from pathlib import Path
 
@@ -8,23 +13,25 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
 
 def evaluate(model, loader, device):
-    """Quick eval — returns (acc, f1_macro)."""
+    """Quick eval. Returns (acc, f1_macro). Handles 1- or 2-stream loaders."""
     model.eval()
     preds, gts = [], []
     with torch.no_grad():
-        for XH, XV, y in loader:
-            preds += model(XH.to(device), XV.to(device)).argmax(1).cpu().tolist()
+        for *inputs, y in loader:
+            inputs = [t.to(device) for t in inputs]
+            preds += model(*inputs).argmax(1).cpu().tolist()
             gts   += y.tolist()
     return accuracy_score(gts, preds), f1_score(gts, preds, average='macro')
 
 
 def evaluate_full(model, loader, device, num_classes):
-    """Full eval — returns all metrics + raw arrays."""
+    """Full eval. Returns (acc, f1, f1_per_cls, cm, preds, probs, gts)."""
     model.eval()
     preds, probs, gts = [], [], []
     with torch.no_grad():
-        for XH, XV, y in loader:
-            logits = model(XH.to(device), XV.to(device))
+        for *inputs, y in loader:
+            inputs = [t.to(device) for t in inputs]
+            logits = model(*inputs)
             probs  += torch.softmax(logits, 1).cpu().numpy().tolist()
             preds  += logits.argmax(1).cpu().tolist()
             gts    += y.tolist()
@@ -35,12 +42,15 @@ def evaluate_full(model, loader, device, num_classes):
     return acc, f1, f1_per_cls, cm, preds, probs, gts
 
 
-def measure_efficiency(model, device, xh_shape, xv_shape):
-    """Measure params, model size, MACs, GPU latency.
+def measure_efficiency(model, device, input_shapes):
+    """Params, model size, MACs, GPU latency.
 
     Args:
-        xh_shape: (seq_len, features) of XH — e.g. (500, 135)
-        xv_shape: (seq_len, features) of XV — e.g. (500, 135)
+        input_shapes: tuple of per-input shapes WITHOUT batch dim. One entry per
+            forward argument:
+                single-stream : ((270, 1000),)             → model(X)
+                dual-stream    : ((500, 135), (500, 135))  → model(XH, XV)
+                wavmamba       : ((27, 500, 15),)          → model(X)
     """
     params_m = sum(p.numel() for p in model.parameters()) / 1e6
 
@@ -50,15 +60,14 @@ def measure_efficiency(model, device, xh_shape, xv_shape):
     model_size_mb = tmp.stat().st_size / 1e6
     tmp.unlink(missing_ok=True)
 
-    XH_d = torch.randn(1, *xh_shape).to(device)
-    XV_d = torch.randn(1, *xv_shape).to(device)
+    inputs = tuple(torch.randn(1, *s).to(device) for s in input_shapes)
 
     try:
         from fvcore.nn import FlopCountAnalysis
-        _flops = FlopCountAnalysis(model, (XH_d, XV_d))
+        _flops = FlopCountAnalysis(model, inputs)
         _flops.unsupported_ops_warnings(False)
         macs_g    = round(_flops.total() / 2e9, 3)   # FLOPs / 2 = MACs
-        macs_note = 'fvcore (Mamba selective_scan_cuda excluded)'
+        macs_note = 'fvcore (Mamba selective_scan_cuda excluded if present)'
     except Exception:
         macs_g    = None
         macs_note = 'N/A — fvcore not installed'
@@ -66,13 +75,14 @@ def measure_efficiency(model, device, xh_shape, xv_shape):
     if device.type == 'cuda':
         model.eval()
         with torch.no_grad():
-            for _ in range(50): model(XH_d, XV_d)
+            for _ in range(50):
+                model(*inputs)
         timings = []
         with torch.no_grad():
             for _ in range(200):
                 s = torch.cuda.Event(enable_timing=True)
                 e = torch.cuda.Event(enable_timing=True)
-                s.record(); model(XH_d, XV_d); e.record()
+                s.record(); model(*inputs); e.record()
                 torch.cuda.synchronize()
                 timings.append(s.elapsed_time(e))
         lat_mean = round(float(np.mean(timings)), 2)

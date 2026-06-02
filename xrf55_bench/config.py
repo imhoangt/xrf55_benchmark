@@ -20,7 +20,7 @@ class TrainCfg:
     betas:            tuple          = (0.9, 0.999)
     eps:              float          = 1e-8
 
-    # Scheduler: None | 'cosine' | 'step' | 'multistep' | 'warmup_cosine'
+    # Scheduler: None | 'cosine' | 'multistep' | 'warmup_cosine'
     scheduler:        Optional[str]  = None
     warmup_epochs:    int            = 0
     floor_lr:         float          = 1e-5

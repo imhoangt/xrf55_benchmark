@@ -44,8 +44,8 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.preprocessing.dwt    import apply_dwt2_stack
-from src.data.preprocessing.parser import ACTION_ID_TO_LABEL, ACTION_IDS_USED
+from xrf55_bench.preprocessing.dwt    import apply_dwt2_stack
+from xrf55_bench.preprocessing.parser import ACTION_ID_TO_LABEL, ACTION_IDS_USED
 
 NPY_DIR   = PROJECT_ROOT / 'dataset' / 'XRF55' / 'raw_npy_nosc'
 BENCH_DIR = PROJECT_ROOT / 'dataset' / 'XRF55' / 'bench' / 'raw_nosc'

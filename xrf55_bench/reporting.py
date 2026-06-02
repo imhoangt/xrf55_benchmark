@@ -192,6 +192,10 @@ def build_metrics(model_name: str, bench_dir, cfg,
         'model':     f'xrf55_bench_{model_name}',
         'dataset':   'xrf55',
         'split':     'train=reps1-14  test=reps15-20',
+        'eval':      ('Reported metrics (per_seed.test_* and summary.test_*) come '
+                      'from last_model.pt = final epoch. The per_seed.best_epoch / '
+                      'best_test_acc fields are train-time diagnostics selected by '
+                      'peeking at test accuracy and MUST NOT be used as headline results.'),
         'bench_dir': str(bench_dir) if bench_dir else None,
         'config':    cfg_dict,
         'per_seed':  {str(s): v for s, v in per_seed_results.items()},
