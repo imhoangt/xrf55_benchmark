@@ -60,7 +60,7 @@ from xrf55_bench.utils.train_utils import configure_speed_mode, set_seed
 # ── Model configs ─────────────────────────────────────────────────────────────
 
 NUM_CLASSES  = 11
-_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba']
+_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba', 'wavmamba_late']
 
 
 def _get_model_cfg(model_name: str) -> dict:
@@ -99,6 +99,16 @@ def _get_model_cfg(model_name: str) -> dict:
         return dict(
             factory      = lambda: WavMambaHAR(num_classes=NUM_CLASSES),
             title        = 'WavMambaHAR',
+            is_2stream   = False,
+            eval_fn      = evaluate,
+            eval_full_fn = evaluate_full,
+            meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
+        )
+    if model_name == 'wavmamba_late':
+        from xrf55_bench.models.wavcnnmamba_late.model import WavMambaHAR
+        return dict(
+            factory      = lambda: WavMambaHAR(num_classes=NUM_CLASSES),
+            title        = 'WavMambaHAR-LateFusion',
             is_2stream   = False,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
