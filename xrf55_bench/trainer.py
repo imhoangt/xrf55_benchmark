@@ -213,6 +213,22 @@ def _make_scheduler(optimizer, cfg: TrainCfg):
             return floor_ratio + (1.0 - floor_ratio) * cos_val
 
         return LambdaLR(optimizer, _lr_lambda)
+    if cfg.scheduler == 'warmup_linear':
+        # Identical warmup + endpoints as warmup_cosine, but the post-warmup
+        # decay is LINEAR (peak → floor_lr) instead of cosine.
+        W           = cfg.warmup_epochs
+        T           = cfg.num_epochs
+        floor_ratio = cfg.floor_lr / cfg.lr
+
+        def _lr_lambda(epoch):
+            if epoch < W:
+                # Linear warmup: epoch 0 → 1/W, ..., epoch W-1 → 1.0
+                return (epoch + 1) / max(W, 1)
+            # Linear decay: 1.0 (just after warmup) → floor_ratio at the last epoch
+            progress = min((epoch - W + 1) / max(T - W, 1), 1.0)
+            return floor_ratio + (1.0 - floor_ratio) * (1.0 - progress)
+
+        return LambdaLR(optimizer, _lr_lambda)
     raise ValueError(f"Unknown scheduler: {cfg.scheduler!r}")
 
 

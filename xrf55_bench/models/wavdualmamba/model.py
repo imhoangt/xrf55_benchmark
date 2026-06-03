@@ -53,7 +53,8 @@ Ablation flags:
                      {HL,LH} {LL,HL} {LL,LH} {LL,HL,LH}.
     share_branches — tie the TFBlock+embed+BiMamba across subbands (stems stay
                      per-subband). Default False (separate, more expressive).
-    use_pos_emb    — learned absolute PE (default False; Mamba encodes order).
+    use_pos_emb    — sinusoidal absolute PE (default False; Mamba encodes order
+                     via its recurrence, so PE is usually redundant here).
     bidirectional  — backward Mamba branch + gate (default True).
     freq_mix       — None | 'mlp'. 'mlp' inserts a nonlinear MLP-Mixer over the
                      F subcarriers before flatten (zero-init ⇒ identity at step 0).
@@ -62,9 +63,10 @@ Ablation flags:
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 try:
     from mamba_ssm import Mamba
@@ -94,6 +96,21 @@ def _gn_groups(d: int) -> int:
         if d % g == 0:
             return g
     return 1
+
+
+def _sincos_pe(length: int, d_model: int) -> torch.Tensor:
+    """Sinusoidal absolute positional encoding [Vaswani et al. 2017].
+
+    Returns (1, length, d_model) — parameter-free and well-defined for any
+    length (generalises beyond the cached table). Handles odd d_model.
+    """
+    pe  = torch.zeros(length, d_model)
+    pos = torch.arange(length, dtype=torch.float).unsqueeze(1)
+    div = torch.exp(torch.arange(0, d_model, 2).float()
+                    * (-math.log(10000.0) / d_model))
+    pe[:, 0::2] = torch.sin(pos * div)
+    pe[:, 1::2] = torch.cos(pos * div[: pe[:, 1::2].shape[1]])
+    return pe.unsqueeze(0)
 
 
 # ─── Stochastic depth ─────────────────────────────────────────────────────────
@@ -305,10 +322,12 @@ class BranchBackbone(nn.Module):
         self.use_pos_emb = use_pos_emb
         self.t_max = t_max
         if use_pos_emb:
-            self.pos_emb = nn.Parameter(torch.zeros(1, t_max, d_model))
-            nn.init.trunc_normal_(self.pos_emb, std=0.02)
+            # Sinusoidal (Vaswani) absolute PE — parameter-free, length-robust.
+            # Non-persistent buffer: deterministic, recomputed on load (not saved).
+            self.register_buffer("pos_emb", _sincos_pe(t_max, d_model),
+                                 persistent=False)
         else:
-            self.register_parameter("pos_emb", None)
+            self.pos_emb = None
         self.mamba = BiMamba(d_model, n_layers=n_mamba_layers, d_state=d_state,
                              d_conv=d_conv, expand=expand,
                              drop_path_rates=dp_mamba, bidirectional=bidirectional)
@@ -319,8 +338,8 @@ class BranchBackbone(nn.Module):
         T = x.size(1)
         if T <= self.t_max:
             return x + self.pos_emb[:, :T]
-        pe = F.interpolate(self.pos_emb.transpose(1, 2), size=T,
-                           mode="linear", align_corners=False).transpose(1, 2)
+        # Longer than the cached table (rare): build sinusoidal PE on the fly.
+        pe = _sincos_pe(T, x.size(-1)).to(device=x.device, dtype=x.dtype)
         return x + pe
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -426,7 +445,8 @@ class WavDualMamba(nn.Module):
         dp_cnn         : DropPath for the single TFBlock (default 0.0).
         dp_mamba       : DropPath per BiMamba layer (len == n_mamba_layers).
         bidirectional  : gated backward Mamba branch (default True).
-        use_pos_emb    : learned positional embedding (default False).
+        use_pos_emb    : sinusoidal positional embedding (default False;
+                         parameter-free, length-robust).
         share_branches : tie TFBlock+embed+BiMamba across subbands; stems stay
                          per-subband (default False). When True, the branches are
                          run in ONE batched backbone call (≈ N× throughput).
