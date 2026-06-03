@@ -328,6 +328,8 @@ class AttnStatPool(nn.Module):
         self.score = nn.Sequential(
             nn.Linear(dim, bn), nn.Tanh(), nn.Linear(bn, dim)
         )
+        nn.init.zeros_(self.score[-1].weight)
+        nn.init.zeros_(self.score[-1].bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         w    = self.score(x).softmax(dim=1)                   # (B, T, C)
@@ -339,20 +341,19 @@ class AttnStatPool(nn.Module):
 # ─── M5: Classifier ───────────────────────────────────────────────────────────
 
 class Classifier(nn.Module):
-    """MLP head: LayerNorm → [Dropout]? → Linear → SiLU → Dropout → Linear."""
+    """Head: LayerNorm → Dropout → Linear(d → num_classes).
 
-    def __init__(self, d: int = 256, hidden: int = 128, num_classes: int = 11,
-                 dropout: float = 0.2, dropout_in: float = 0.0):
+    Pass hidden > 0 to insert an extra Linear → SiLU → Dropout hidden layer.
+    """
+
+    def __init__(self, d: int = 256, hidden: int = 0, num_classes: int = 11,
+                 dropout: float = 0.2):
         super().__init__()
-        layers: list[nn.Module] = [nn.LayerNorm(d)]
-        if dropout_in > 0.0:
-            layers.append(nn.Dropout(dropout_in))
-        layers.extend([
-            nn.Linear(d, hidden),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, num_classes),
-        ])
+        layers: list[nn.Module] = [nn.LayerNorm(d), nn.Dropout(dropout)]
+        if hidden:
+            layers += [nn.Linear(d, hidden), nn.SiLU(), nn.Dropout(dropout)]
+            d = hidden
+        layers.append(nn.Linear(d, num_classes))
         self.net = nn.Sequential(*layers)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -452,8 +453,7 @@ class WavMambaHAR(nn.Module):
         self.mamba = BiMamba(d_model, n_layers=n_mamba_layers,
                              d_state=d_state, drop_path_rates=dp_mamba)
         self.tpool = AttnStatPool(d_model, bn=d_model // 2)
-        self.head  = Classifier(2 * d_model, hidden=128,
-                                num_classes=num_classes)
+        self.head  = Classifier(2 * d_model, num_classes=num_classes)
 
     # ── Public property ───────────────────────────────────────────────────────
 

@@ -60,16 +60,25 @@ from xrf55_bench.utils.train_utils import configure_speed_mode, set_seed
 # ── Model configs ─────────────────────────────────────────────────────────────
 
 NUM_CLASSES  = 11
-_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba', 'wavmamba_late']
+_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba', 'wavdualmamba']
 
 
-def _get_model_cfg(model_name: str) -> dict:
+def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
     """Return model config dict with lazy-loaded model imports.
 
     eval/efficiency are the unified helpers in utils.eval (1- and 2-stream aware).
     input_shapes lists each forward argument's shape (no batch dim).
+
+    model_kwargs: extra constructor kwargs forwarded to the model factory.
+        Currently only 'wavdualmamba' accepts them (e.g. subbands, share_branches,
+        use_pos_emb, bidirectional, d_model, ...) — used to run ablations.
     """
     from xrf55_bench.utils.eval import evaluate, evaluate_full, measure_efficiency
+
+    model_kwargs = model_kwargs or {}
+    if model_kwargs and model_name != 'wavdualmamba':
+        raise ValueError(
+            f"model_kwargs is only supported for 'wavdualmamba', got {model_name!r}")
 
     if model_name == 'resnet':
         from xrf55_bench.models.resnet1d.model import resnet18
@@ -104,11 +113,11 @@ def _get_model_cfg(model_name: str) -> dict:
             eval_full_fn = evaluate_full,
             meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
         )
-    if model_name == 'wavmamba_late':
-        from xrf55_bench.models.wavcnnmamba_late.model import WavMambaHAR
+    if model_name == 'wavdualmamba':
+        from xrf55_bench.models.wavdualmamba.model import WavDualMamba
         return dict(
-            factory      = lambda: WavMambaHAR(num_classes=NUM_CLASSES),
-            title        = 'WavMambaHAR-LateFusion',
+            factory      = lambda: WavDualMamba(num_classes=NUM_CLASSES, **model_kwargs),
+            title        = 'WavDualMamba',
             is_2stream   = False,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
@@ -257,13 +266,15 @@ def _train_epoch(model, loader, criterion, optimizer, scheduler,
 def main(model_name: str, output_dir,
          bench_dir=None,
          cfg: TrainCfg = None,
-         num_workers: int = 4):
+         num_workers: int = 4,
+         model_kwargs: dict = None):
     if cfg is None:
         cfg = TrainCfg_for_protocol('03')
     if not cfg.seeds:
         raise ValueError('cfg.seeds is empty — provide at least one seed.')
     if model_name not in _MODEL_NAMES:
         raise ValueError(f"Unknown model '{model_name}'. Choose from: {_MODEL_NAMES}")
+    model_kwargs = model_kwargs or {}
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -273,7 +284,7 @@ def main(model_name: str, output_dir,
     configure_speed_mode()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    mc           = _get_model_cfg(model_name)
+    mc           = _get_model_cfg(model_name, model_kwargs)
     model_title  = mc['title']
     is_2stream   = mc['is_2stream']
     eval_fn      = mc['eval_fn']
@@ -330,6 +341,8 @@ def main(model_name: str, output_dir,
         print(f'Train    : {len(train_loader.dataset):<10}  Test     : {len(test_loader.dataset)}')
         print(f'Params   : {n_params:,} ({n_params / 1e6:.3f}M)')
         print(f'Protocol : {cfg.protocol}  |  data={cfg.data_mode}  seeds={list(cfg.seeds)}')
+        if model_kwargs:
+            print(f'ModelCfg : {model_kwargs}')
         print(f'Opt      : {cfg.optimizer}  betas={betas_str}  eps={cfg.eps}')
         print(f'Hyper    : lr={cfg.lr}  bs={cfg.batch_size}  epochs={cfg.num_epochs}  '
               f'wd={cfg.weight_decay}  clip={clip_str}')
@@ -339,7 +352,7 @@ def main(model_name: str, output_dir,
 
         log_rows      = []
         t_seed_start  = time.time()
-        best_test_acc = 0.0
+        best_test_acc = -1.0   # < 0 so epoch 1 always saves best_model.pt
         best_epoch    = 1
         _interrupted  = False
 
@@ -482,7 +495,8 @@ def main(model_name: str, output_dir,
         _plot_seed_comparison(per_seed_results, plots_dir, model_title)
 
     # ── metrics.json ──────────────────────────────────────────────────────────
-    metrics = build_metrics(model_name, bench_dir, cfg, per_seed_results, summary)
+    metrics = build_metrics(model_name, bench_dir, cfg, per_seed_results, summary,
+                            model_kwargs=model_kwargs)
     save_metrics(output_dir, metrics)
 
     # ── ZIP ───────────────────────────────────────────────────────────────────
@@ -496,13 +510,18 @@ def main(model_name: str, output_dir,
 
 def run(model_name: str, bench_dir=None,
         output_dir=None, train_cfg=None,
-        num_workers: int = 4):
-    """Callable entry point for Kaggle notebooks."""
+        num_workers: int = 4, model_kwargs: dict = None):
+    """Callable entry point for Kaggle notebooks.
+
+    model_kwargs: extra model constructor kwargs (wavdualmamba only), e.g.
+        run('wavdualmamba', ..., model_kwargs={'subbands': ('HL', 'LH')})
+        to run a subband ablation.
+    """
     _bench = Path(bench_dir)  if bench_dir  else _default_bench_dir()
     _out   = Path(output_dir) if output_dir else _default_output_dir(model_name)
     main(model_name, _out,
          bench_dir=_bench,
-         cfg=train_cfg, num_workers=num_workers)
+         cfg=train_cfg, num_workers=num_workers, model_kwargs=model_kwargs)
 
 
 def _default_bench_dir():

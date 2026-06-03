@@ -193,27 +193,35 @@ def save_combined_zip(output_dir: Path, model_name: str,
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
 def build_metrics(model_name: str, bench_dir, cfg,
-                  per_seed_results: dict, summary: dict) -> dict:
+                  per_seed_results: dict, summary: dict,
+                  model_kwargs: dict = None) -> dict:
     """Assemble the full metrics dict from training results.
 
     cfg: TrainCfg instance (duck-typed to avoid circular imports).
+    model_kwargs: extra model-constructor kwargs (e.g. ablation subbands),
+        recorded under 'model_config' for traceability.
     """
     cfg_dict = {
         k: list(v) if isinstance(v, tuple) else v
         for k, v in dataclasses.asdict(cfg).items()
     }
+    model_config = {
+        k: list(v) if isinstance(v, tuple) else v
+        for k, v in (model_kwargs or {}).items()
+    }
     return {
-        'model':     f'xrf55_bench_{model_name}',
-        'dataset':   'xrf55',
-        'split':     'train=reps1-14  test=reps15-20',
-        'eval':      ('Reported metrics (per_seed.test_* and summary.test_*) come '
-                      'from last_model.pt = final epoch. The per_seed.best_epoch / '
-                      'best_test_acc fields are train-time diagnostics selected by '
-                      'peeking at test accuracy and MUST NOT be used as headline results.'),
-        'bench_dir': str(bench_dir) if bench_dir else None,
-        'config':    cfg_dict,
-        'per_seed':  {str(s): v for s, v in per_seed_results.items()},
-        'summary':   summary,
+        'model':        f'xrf55_bench_{model_name}',
+        'dataset':      'xrf55',
+        'split':        'train=reps1-14  test=reps15-20',
+        'eval':         ('Reported metrics (per_seed.test_* and summary.test_*) come '
+                         'from last_model.pt = final epoch. The per_seed.best_epoch / '
+                         'best_test_acc fields are train-time diagnostics selected by '
+                         'peeking at test accuracy and MUST NOT be used as headline results.'),
+        'bench_dir':    str(bench_dir) if bench_dir else None,
+        'config':       cfg_dict,
+        'model_config': model_config,
+        'per_seed':     {str(s): v for s, v in per_seed_results.items()},
+        'summary':      summary,
     }
 
 

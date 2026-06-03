@@ -31,7 +31,7 @@ class TrainCfg:
     label_smoothing:  float          = 0.0
 
     # Data mode: 'raw' | 'proc' | None (None = auto-infer from stats.json meta)
-    data_mode:        Optional[str]  = 'raw'
+    data_mode:        Optional[str]  = None
 
     # Seeds — (42,) single default, (4, 8, 17, 42) multi
     seeds:            tuple          = (42,)
