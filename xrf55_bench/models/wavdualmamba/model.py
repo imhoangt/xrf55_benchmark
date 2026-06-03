@@ -35,10 +35,11 @@ Input  : X (B, 27, T2, F2), subband-major channels
 Per-branch (one per SELECTED subband s):
     subband_s (B, M*A, T2, F2)
       → Stem_s         per-subband conv (LL/HL/LH kernel) + GN + SiLU
-      → TFBlock        1 light pre-norm axial-depthwise block (local context)
+                       [temporal_stride=2 → T2 500→250]
+      → TFBlock×2      dilation [1,2] → RF 7→19 timesteps (drop_path 0.0,0.05)
       → [FreqMix]      optional nonlinear subcarrier mix (freq_mix='mlp')
       → flatten F×C    (B, d_stem, T2, F2) → (B, T2, d_stem*F2)   ← KEEP frequency
-      → Linear embed   d_stem*F2 → d_model               [+ optional PosEmb]
+      → Linear embed   d_stem*F2 → d_model + Dropout(0.1) [+ optional PosEmb]
       → BiMamba ×L      fwd/bwd merged by a per-channel ZERO-INIT gate
                         (starts at ½(fwd+bwd), specialises if data supports it)
     ⇒ S_s (B, T2, d_model)
@@ -135,11 +136,14 @@ class DropPath(nn.Module):
 class SubbandStem(nn.Module):
     """Conv2d(in_ch → d_stem) + GroupNorm + SiLU, one per subband."""
 
-    def __init__(self, in_ch: int, d_stem: int = 32, kernel=(5, 5)):
+    def __init__(self, in_ch: int, d_stem: int = 16, kernel=(5, 5),
+                 temporal_stride: int = 1):
         super().__init__()
         kt, kf = kernel
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch, d_stem, (kt, kf), padding=(kt // 2, kf // 2)),
+            nn.Conv2d(in_ch, d_stem, (kt, kf),
+                      stride=(temporal_stride, 1),
+                      padding=(kt // 2, kf // 2)),
             nn.GroupNorm(_gn_groups(d_stem), d_stem),
             nn.SiLU(),
         )
@@ -205,7 +209,7 @@ class BiMambaLayer(nn.Module):
     Mamba (no gate), for ablation.
     """
 
-    def __init__(self, d_model: int, d_state: int = 16, d_conv: int = 4,
+    def __init__(self, d_model: int, d_state: int = 32, d_conv: int = 4,
                  expand: int = 2, drop_path: float = 0.0,
                  bidirectional: bool = True):
         super().__init__()
@@ -245,7 +249,7 @@ class BiMambaLayer(nn.Module):
 class BiMamba(nn.Module):
     """Stack of gated (bi)directional Mamba layers + final RMSNorm."""
 
-    def __init__(self, d_model: int, n_layers: int = 2, d_state: int = 16,
+    def __init__(self, d_model: int, n_layers: int = 2, d_state: int = 32,
                  d_conv: int = 4, expand: int = 2,
                  drop_path_rates=(0.0, 0.05), bidirectional: bool = True):
         super().__init__()
@@ -299,25 +303,34 @@ class FreqMix(nn.Module):
 # ─── Per-subband branch backbone (shareable) ──────────────────────────────────
 
 class BranchBackbone(nn.Module):
-    """TFBlock → flatten F×C → Linear embed [+ PosEmb] → BiMamba.
+    """TFBlock×2 (dilation 1,2) → flatten F×C → Linear embed [+ PosEmb] → BiMamba.
 
     Input  : (B, d_stem, T2, F2)    Output: (B, T2, d_model)
     """
 
     def __init__(self, d_stem: int, f2: int, d_model: int = 64,
-                 dp_cnn: float = 0.0, n_mamba_layers: int = 2,
-                 d_state: int = 16, d_conv: int = 4, expand: int = 2,
+                 dp_cnn: tuple = (0.0, 0.05), dilations: tuple = (1, 2),
+                 n_mamba_layers: int = 2,
+                 d_state: int = 32, d_conv: int = 4, expand: int = 2,
                  dp_mamba=(0.0, 0.05), bidirectional: bool = True,
                  use_pos_emb: bool = False, freq_mix: str = None,
-                 t_max: int = 500):
+                 embed_drop: float = 0.1, t_max: int = 500):
         super().__init__()
         if freq_mix not in (None, 'mlp'):
             raise ValueError(f"freq_mix must be None or 'mlp', got {freq_mix!r}")
-        self.block    = TFBlock(d_stem, drop_path=dp_cnn)
+        if len(dp_cnn) != len(dilations):
+            raise ValueError(
+                f"len(dp_cnn)={len(dp_cnn)} must equal len(dilations)={len(dilations)}"
+            )
+        self.blocks   = nn.ModuleList([
+            TFBlock(d_stem, dilation=dilations[i], drop_path=dp_cnn[i])
+            for i in range(len(dilations))
+        ])
         self.freq_mix = FreqMix(f2) if freq_mix == 'mlp' else None
         self.embed = nn.Sequential(
             nn.Linear(d_stem * f2, d_model),
             nn.SiLU(),
+            nn.Dropout(embed_drop),
         )
         self.use_pos_emb = use_pos_emb
         self.t_max = t_max
@@ -343,7 +356,8 @@ class BranchBackbone(nn.Module):
         return x + pe
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.block(x)                                # (B, d_stem, T2, F2)
+        for blk in self.blocks:
+            x = blk(x)                                   # (B, d_stem, T2, F2)
         if self.freq_mix is not None:
             x = self.freq_mix(x)                         # nonlinear subcarrier mix
         B, C, T, Fd = x.shape
@@ -438,11 +452,15 @@ class WavDualMamba(nn.Module):
         subbands       : subset of ('LL','HL','LH') to use as branches
                          (default all three). Order is normalised to LL,HL,LH.
         d_model        : branch feature width (default 64).
-        d_stem         : per-subband stem width (default 32, %8==0 preferred).
+        d_stem         : per-subband stem width (default 16).
         d_state        : Mamba SSM state size (default 16).
         n_mamba_layers : BiMamba layers per branch (default 2).
         f2             : subcarrier axis length after DWT (default 15).
-        dp_cnn         : DropPath for the single TFBlock (default 0.0).
+        dp_cnn         : DropPath per TFBlock (default (0.0, 0.05) for 2 blocks).
+        dilations      : dilation per TFBlock (default (1, 2) → RF 7, 19 timesteps).
+        embed_drop     : Dropout after Linear embed, before Mamba (default 0.1).
+        temporal_stride: stride along time axis in the stem conv (default 1).
+                         Set to 2 to halve T2 (500→250) for faster training.
         dp_mamba       : DropPath per BiMamba layer (len == n_mamba_layers).
         bidirectional  : gated backward Mamba branch (default True).
         use_pos_emb    : sinusoidal positional embedding (default False;
@@ -468,12 +486,15 @@ class WavDualMamba(nn.Module):
         n_antennas: int = 3,
         subbands=('LL', 'HL', 'LH'),
         d_model: int = 64,
-        d_stem: int = 32,
-        d_state: int = 16,
+        d_stem: int = 16,
+        d_state: int = 32,
         n_mamba_layers: int = 2,
         f2: int = 15,
-        dp_cnn: float = 0.0,
+        dp_cnn: tuple = (0.0, 0.05),
+        dilations: tuple = (1, 2),
         dp_mamba=(0.0, 0.05),
+        embed_drop: float = 0.1,
+        temporal_stride: int = 1,
         bidirectional: bool = True,
         use_pos_emb: bool = False,
         share_branches: bool = False,
@@ -504,18 +525,22 @@ class WavDualMamba(nn.Module):
         self._sb_index  = {s: _SUBBAND_ORDER.index(s) for s in self.subbands}
 
         # Per-subband stems (always separate — physically-motivated kernels).
+        self.temporal_stride = temporal_stride
         self.stems = nn.ModuleDict({
-            s: SubbandStem(self.n_per_sub, d_stem, kernel=_SUBBAND_KERNEL[s])
+            s: SubbandStem(self.n_per_sub, d_stem, kernel=_SUBBAND_KERNEL[s],
+                           temporal_stride=temporal_stride)
             for s in self.subbands
         })
 
         # Branch backbones: shared (one) or separate (one per subband).
         bb_kwargs = dict(
-            d_stem=d_stem, f2=f2, d_model=d_model, dp_cnn=dp_cnn,
+            d_stem=d_stem, f2=f2, d_model=d_model,
+            dp_cnn=dp_cnn, dilations=dilations,
             n_mamba_layers=n_mamba_layers, d_state=d_state,
             d_conv=d_conv, expand=expand, dp_mamba=dp_mamba,
             bidirectional=bidirectional, use_pos_emb=use_pos_emb,
-            freq_mix=freq_mix, t_max=t_max,
+            freq_mix=freq_mix, embed_drop=embed_drop,
+            t_max=t_max // max(temporal_stride, 1),
         )
         self.share_branches = share_branches
         if share_branches:
