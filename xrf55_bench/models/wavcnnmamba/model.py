@@ -61,7 +61,7 @@ class TFBlock(nn.Module):
 
     Flow (Pre-GroupNorm, single residual sub-block):
         y = GroupNorm(x)
-        y = dw_t(y) + dw_f(y)   # parallel axial depthwise mixing
+        y = dw_f(dw_t(y))        # sequential axial: temporal first, then freq
         y = pw(SiLU(y))          # pointwise channel projection
         out = x + DropPath(y)    # residual
 
@@ -84,7 +84,7 @@ class TFBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.norm(x)
-        y = self.dw_t(y) + self.dw_f(y)
+        y = self.dw_f(self.dw_t(y))
         y = self.pw(self.act(y))
         return x + self.dp(y)
 
@@ -147,7 +147,7 @@ class Encoder(nn.Module):
             nn.Sequential(
                 nn.Conv2d(n_per_sub, d_subband, (kt, kf),
                           padding=(kt // 2, kf // 2)),
-                nn.GroupNorm(8, d_subband),
+                nn.GroupNorm(d_subband // 8, d_subband),
                 nn.SiLU(),
             )
             for (kt, kf) in stem_kernels
@@ -323,7 +323,7 @@ class AttnStatPool(nn.Module):
     Output: (B, 2·d_model)
     """
 
-    def __init__(self, dim: int = 128, bn: int = 32):
+    def __init__(self, dim: int = 128, bn: int = 64):
         super().__init__()
         self.score = nn.Sequential(
             nn.Linear(dim, bn), nn.Tanh(), nn.Linear(bn, dim)
@@ -451,7 +451,7 @@ class WavMambaHAR(nn.Module):
 
         self.mamba = BiMamba(d_model, n_layers=n_mamba_layers,
                              d_state=d_state, drop_path_rates=dp_mamba)
-        self.tpool = AttnStatPool(d_model, bn=32)
+        self.tpool = AttnStatPool(d_model, bn=d_model // 2)
         self.head  = Classifier(2 * d_model, hidden=128,
                                 num_classes=num_classes)
 
