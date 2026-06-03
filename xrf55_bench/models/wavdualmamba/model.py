@@ -453,7 +453,7 @@ class WavDualMamba(nn.Module):
                          (default all three). Order is normalised to LL,HL,LH.
         d_model        : branch feature width (default 64).
         d_stem         : per-subband stem width (default 16).
-        d_state        : Mamba SSM state size (default 16).
+        d_state        : Mamba SSM state size (default 32).
         n_mamba_layers : BiMamba layers per branch (default 2).
         f2             : subcarrier axis length after DWT (default 15).
         dp_cnn         : DropPath per TFBlock (default (0.0, 0.05) for 2 blocks).
