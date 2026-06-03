@@ -251,7 +251,7 @@ class BiMamba(nn.Module):
 
     def __init__(self, d_model: int, n_layers: int = 2, d_state: int = 32,
                  d_conv: int = 4, expand: int = 2,
-                 drop_path_rates=(0.0, 0.05), bidirectional: bool = True):
+                 drop_path_rates=(0.0, 0.10), bidirectional: bool = True):
         super().__init__()
         if len(drop_path_rates) != n_layers:
             raise ValueError(
@@ -312,7 +312,7 @@ class BranchBackbone(nn.Module):
                  dp_cnn: tuple = (0.0, 0.05), dilations: tuple = (1, 2),
                  n_mamba_layers: int = 2,
                  d_state: int = 32, d_conv: int = 4, expand: int = 2,
-                 dp_mamba=(0.0, 0.05), bidirectional: bool = True,
+                 dp_mamba=(0.0, 0.10), bidirectional: bool = True,
                  use_pos_emb: bool = False, freq_mix: str = None,
                  embed_drop: float = 0.1, t_max: int = 500):
         super().__init__()
@@ -492,7 +492,7 @@ class WavDualMamba(nn.Module):
         f2: int = 15,
         dp_cnn: tuple = (0.0, 0.05),
         dilations: tuple = (1, 2),
-        dp_mamba=(0.0, 0.05),
+        dp_mamba=(0.0, 0.10),
         embed_drop: float = 0.1,
         temporal_stride: int = 1,
         bidirectional: bool = True,
