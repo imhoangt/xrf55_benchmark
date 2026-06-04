@@ -6,14 +6,17 @@ from typing import Optional
 
 @dataclass
 class TrainCfg:
-    protocol:         str            = '03'    # '01' | '02' | '03'
+    # Bare TrainCfg() mirrors protocol '01' (the plain baseline) so the protocol
+    # label always matches the fields. Use TrainCfg_for_protocol() — the canonical
+    # constructor — for '02' / '03'; it overrides every field below per preset.
+    protocol:         str            = '01'    # '01' | '02' | '03'
 
     # Hyperparameters
-    lr:               float          = 1e-3
+    lr:               float          = 1e-4
     batch_size:       int            = 32
     num_epochs:       int            = 40
     grad_clip:        Optional[float]= None    # None = no clipping
-    weight_decay:     float          = 0.0
+    weight_decay:     float          = 0.01
 
     # Optimizer: 'adamw' | 'adam' | 'sgd'
     optimizer:        str            = 'adamw'
