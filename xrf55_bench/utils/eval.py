@@ -66,8 +66,11 @@ def measure_efficiency(model, device, input_shapes):
         from fvcore.nn import FlopCountAnalysis
         _flops = FlopCountAnalysis(model, inputs)
         _flops.unsupported_ops_warnings(False)
-        macs_g    = round(_flops.total() / 2e9, 3)   # FLOPs / 2 = MACs
-        macs_note = 'fvcore (Mamba selective_scan_cuda excluded if present)'
+        # fvcore.total() already returns MACs — it counts one fused multiply-add
+        # as a single unit (verified: Linear(10->20)=200, Conv1d=1344 = MAC counts).
+        # Divide by 1e9 for GMACs; dividing by 2e9 would under-report by 2×.
+        macs_g    = round(_flops.total() / 1e9, 3)
+        macs_note = 'GMACs via fvcore (Mamba selective_scan_cuda excluded if present)'
     except Exception:
         macs_g    = None
         macs_note = 'N/A — fvcore not installed'
