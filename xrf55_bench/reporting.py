@@ -143,18 +143,22 @@ def _plot_seed_comparison(per_seed_results: dict, plots_dir: Path, title: str):
 
 # ── ZIP ───────────────────────────────────────────────────────────────────────
 
-def save_combined_zip(output_dir: Path, model_name: str,
-                      data_mode: str, protocol: str, seeds) -> Path:
-    """Single zip named {model}_{data_mode}_{protocol}_{MMDD_HHMM}.zip.
+def save_combined_zip(output_dir: Path, seeds) -> Path:
+    """Single zip named {run_tag}_{MMDD_HHMMSS}.zip, run_tag = output_dir.name.
 
     Folder layout:
+      run_config.json   — compact run manifest (top level, first thing visible)
       results_summary/  — metrics, plots, logs, predictions (no weights)
       model/            — last_model.pt + best_model.pt per seed (stored uncompressed)
 
-    Retention: keeps the 2 most-recent zips of the same base name so that at
+    Naming uses output_dir.name (the notebook's auto-tagged run id) so each
+    ablation's zip is self-identifying at the file-browser level; the seconds
+    field (%S) avoids same-minute overwrites on quick reruns.
+
+    Retention: keeps the 2 most-recent zips of the same run_tag so that at
     most 3 zips (2 old + 1 new) coexist on disk at any time.
     """
-    zip_base = f'{model_name}_{data_mode}_{protocol}'
+    zip_base = output_dir.name
 
     # Retain only the 2 newest existing zips; delete the rest
     old_zips = sorted(output_dir.glob(f'{zip_base}_*.zip'),
@@ -162,9 +166,13 @@ def save_combined_zip(output_dir: Path, model_name: str,
     for old in old_zips[:-2]:
         old.unlink()
 
-    ts       = datetime.now().strftime('%m%d_%H%M')
+    ts       = datetime.now().strftime('%m%d_%H%M%S')
     zip_path = output_dir / f'{zip_base}_{ts}.zip'
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # run_config.json — top-level manifest (first entry)
+        p = output_dir / 'run_config.json'
+        if p.exists():
+            zf.write(p, 'run_config.json')
         # results_summary/
         p = output_dir / 'metrics.json'
         if p.exists():
@@ -228,3 +236,109 @@ def build_metrics(model_name: str, bench_dir, cfg,
 def save_metrics(output_dir: Path, metrics: dict):
     with open(output_dir / 'metrics.json', 'w') as f:
         json.dump(metrics, f, indent=2)
+
+
+# ── Run manifest (compact, top-level, aggregatable) ────────────────────────────
+
+def _build_results_block(per_seed: dict, summary: dict) -> dict:
+    """Headline (final-epoch) + diagnostic (best-epoch) + efficiency.
+
+    final_epoch is the HEADLINE (last_model.pt). best_epoch peeks at test
+    accuracy during training, so it is a diagnostic only and is flagged as such
+    — never report it. Shape adapts to single- vs multi-seed.
+    """
+    note = ('final_epoch = last_model.pt (final epoch) is the HEADLINE result. '
+            'best_epoch is selected by peeking at test accuracy during training, '
+            'so it is a DIAGNOSTIC only and MUST NOT be reported as a result.')
+    eff = {
+        'model_size_mb':   summary.get('model_size_mb'),
+        'macs_G':          summary.get('macs_G'),
+        'latency_mean_ms': summary.get('latency_mean_ms'),
+        'latency_std_ms':  summary.get('latency_std_ms'),
+    }
+    seeds = list(per_seed.keys())
+
+    if len(seeds) == 1:
+        v = per_seed[seeds[0]]
+        return {
+            'headline':       'final_epoch',
+            'note':           note,
+            'epochs_trained': v.get('epochs_trained'),
+            'final_epoch': {
+                'test_accuracy': v.get('test_accuracy'),
+                'test_f1_macro': v.get('test_f1_macro'),
+            },
+            'best_epoch': {
+                'epoch':         v.get('best_epoch'),
+                'test_accuracy': v.get('best_test_acc'),
+            },
+            'efficiency': eff,
+        }
+
+    return {
+        'headline': 'final_epoch',
+        'note':     note,
+        'final_epoch': {
+            'test_accuracy_mean': summary.get('test_accuracy_mean'),
+            'test_accuracy_std':  summary.get('test_accuracy_std'),
+            'test_f1_macro_mean': summary.get('test_f1_macro_mean'),
+            'test_f1_macro_std':  summary.get('test_f1_macro_std'),
+        },
+        'best_epoch': {
+            'test_accuracy_mean': summary.get('best_test_acc_mean'),
+            'test_accuracy_std':  summary.get('best_test_acc_std'),
+            'epochs':             summary.get('best_epochs'),
+        },
+        'per_seed': {
+            s: {
+                'final_acc':      per_seed[s].get('test_accuracy'),
+                'best_acc':       per_seed[s].get('best_test_acc'),
+                'best_epoch':     per_seed[s].get('best_epoch'),
+                'epochs_trained': per_seed[s].get('epochs_trained'),
+            } for s in seeds
+        },
+        'efficiency': eff,
+    }
+
+
+def build_run_config(model_name: str, metrics: dict, output_dir: Path,
+                     stats: dict, input_shape, env: dict) -> dict:
+    """Compact, top-level run manifest — inputs + headline results in one file.
+
+    A projection of metrics.json reorganised so a run is self-describing at a
+    glance and aggregatable across ablations into a comparison table. The full,
+    authoritative record stays in metrics.json; this never replaces it.
+
+    Captures the five axes that determine a run: data, training (resolved cfg
+    INCLUDING any overrides — not the protocol label), model (name + kwargs),
+    seeds (via training.seeds), and results. input_shape/env are passed in by
+    the trainer (which holds torch + device).
+    """
+    cfg          = metrics['config']         # resolved TrainCfg (tuples → lists)
+    model_config = metrics['model_config']   # model_kwargs (tuples → lists)
+    summary      = metrics['summary']
+    per_seed     = metrics['per_seed']        # str(seed) → dict
+    meta         = stats.get('meta', {}) if isinstance(stats, dict) else {}
+
+    return {
+        'run_tag': output_dir.name,
+        'model': {
+            'name':        model_name,
+            'params_M':    summary.get('params_M'),
+            'input_shape': input_shape,
+            'kwargs':      model_config,
+        },
+        'data': {
+            'mode':      cfg.get('data_mode'),
+            'source':    meta.get('source'),
+            'bench_dir': metrics.get('bench_dir'),
+        },
+        'training': cfg,                       # verbatim resolved config
+        'results':  _build_results_block(per_seed, summary),
+        'env':      env,
+    }
+
+
+def save_run_config(output_dir: Path, run_config: dict):
+    with open(output_dir / 'run_config.json', 'w') as f:
+        json.dump(run_config, f, indent=2)

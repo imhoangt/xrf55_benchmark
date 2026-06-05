@@ -52,6 +52,7 @@ from xrf55_bench.dataset   import build_loaders, load_stats, infer_data_mode
 from xrf55_bench.reporting import (
     _plot_training_curve, _plot_confusion_matrix, _plot_seed_comparison,
     save_combined_zip, build_metrics, save_metrics,
+    build_run_config, save_run_config,
 )
 from xrf55_bench.utils.amp_utils   import torch_load_checkpoint
 from xrf55_bench.utils.train_utils import configure_speed_mode, set_seed
@@ -88,6 +89,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
             is_2stream   = False,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
+            input_shape  = (270, 1000),
             meas_fn      = lambda m, d: measure_efficiency(m, d, ((270, 1000),)),
         )
     if model_name == 'tfmamba':
@@ -101,6 +103,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
             is_2stream   = True,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
+            input_shape  = ((500, 135), (500, 135)),
             meas_fn      = lambda m, d: measure_efficiency(m, d, ((500, 135), (500, 135))),
         )
     if model_name == 'wavmamba':
@@ -111,6 +114,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
             is_2stream   = False,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
+            input_shape  = (27, 500, 15),
             meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
         )
     if model_name == 'wavdualmamba':
@@ -121,6 +125,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
             is_2stream   = False,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
+            input_shape  = (27, 500, 15),
             meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
         )
     raise ValueError(f"Unknown model '{model_name}'. Choose from: {_MODEL_NAMES}")
@@ -458,6 +463,7 @@ def main(model_name: str, output_dir,
             'test_confusion_matrix': cm,
             'best_epoch':            best_epoch,
             'best_test_acc':         round(best_test_acc, 6),
+            'epochs_trained':        len(log_rows),
             'total_time_s':          round(seed_time),
         }
         per_seed_log_rows[seed] = log_rows
@@ -476,6 +482,7 @@ def main(model_name: str, output_dir,
     # ── Aggregate summary ─────────────────────────────────────────────────────
     accs       = [v['test_accuracy'] for v in per_seed_results.values()]
     f1s        = [v['test_f1_macro']  for v in per_seed_results.values()]
+    best_accs  = [v['best_test_acc']  for v in per_seed_results.values()]
     total_time = round(time.time() - t_total_start)
 
     summary = {
@@ -483,6 +490,8 @@ def main(model_name: str, output_dir,
         'test_accuracy_std':   round(float(np.std(accs)),  6),
         'test_f1_macro_mean':  round(float(np.mean(f1s)),  6),
         'test_f1_macro_std':   round(float(np.std(f1s)),   6),
+        'best_test_acc_mean':  round(float(np.mean(best_accs)), 6),
+        'best_test_acc_std':   round(float(np.std(best_accs)),  6),
         'best_epochs':         [v['best_epoch'] for v in per_seed_results.values()],
         'params_M':            round(params_m, 3),
         'model_size_mb':       round(model_size_mb, 2),
@@ -515,9 +524,19 @@ def main(model_name: str, output_dir,
                             model_kwargs=model_kwargs)
     save_metrics(output_dir, metrics)
 
+    # ── run_config.json — compact top-level manifest ──────────────────────────
+    env = {
+        'torch': torch.__version__,
+        'cuda':  torch.version.cuda,
+        'gpu':   (torch.cuda.get_device_name(0)
+                  if torch.cuda.is_available() else None),
+    }
+    run_config = build_run_config(
+        model_name, metrics, output_dir, stats, mc['input_shape'], env)
+    save_run_config(output_dir, run_config)
+
     # ── ZIP ───────────────────────────────────────────────────────────────────
-    zip_path = save_combined_zip(
-        output_dir, model_name, cfg.data_mode, cfg.protocol, cfg.seeds)
+    zip_path = save_combined_zip(output_dir, cfg.seeds)
     print(f'\nSaved : {output_dir}')
     print(f'ZIP   : {zip_path}')
 
