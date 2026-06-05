@@ -195,23 +195,26 @@ class RMSNorm(nn.Module):
 
 
 class BiMambaLayer(nn.Module):
-    """One (bi)directional Mamba layer — NO FFN — with a learned gate fusing the
-    two directions instead of a plain sum.
+    """One (bi)directional Mamba layer with optional FFN sub-block.
 
+    SSM sub-block (always present):
         h = RMSNorm(x)
         f = Mamba_fwd(h)
         b = flip(Mamba_bwd(flip(h)))
         g = σ(W·[f ‖ b] + c)        # per-channel gate, W=0,c=0 at init ⇒ g≡0.5
         y = g ⊙ f + (1 − g) ⊙ b      # starts as ½(f+b), specialises later
-        out = x + DropPath(y)
+        x = x + DropPath(y)
 
-    With bidirectional=False the layer is a plain unidirectional residual
-    Mamba (no gate), for ablation.
+    FFN sub-block (ffn_ratio > 0):
+        h = RMSNorm(x)
+        x = x + DropPath(fc2(SiLU(fc1(h))))   # fc2 zero-init ⇒ identity at init
+
+    With bidirectional=False the SSM is unidirectional (no gate), for ablation.
     """
 
     def __init__(self, d_model: int, d_state: int = 32, d_conv: int = 4,
                  expand: int = 2, drop_path: float = 0.0,
-                 bidirectional: bool = True):
+                 bidirectional: bool = True, ffn_ratio: int = 0):
         super().__init__()
         if not HAS_MAMBA:
             raise ImportError(
@@ -233,6 +236,16 @@ class BiMambaLayer(nn.Module):
             self.bwd  = None
             self.gate = None
         self.dp = DropPath(drop_path)
+        if ffn_ratio > 0:
+            self.ffn_norm = RMSNorm(d_model)
+            self.ffn_fc1  = nn.Linear(d_model, ffn_ratio * d_model)
+            self.ffn_act  = nn.SiLU()
+            self.ffn_fc2  = nn.Linear(ffn_ratio * d_model, d_model)
+            nn.init.zeros_(self.ffn_fc2.weight)  # identity at init
+            nn.init.zeros_(self.ffn_fc2.bias)
+            self.ffn_dp   = DropPath(drop_path)
+        else:
+            self.ffn_norm = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.norm(x)
@@ -243,7 +256,11 @@ class BiMambaLayer(nn.Module):
             b = self.bwd(h.flip(1)).flip(1)
             g = torch.sigmoid(self.gate(torch.cat([f, b], dim=-1)))   # (B,T,d)
             y = g * f + (1.0 - g) * b
-        return x + self.dp(y)
+        x = x + self.dp(y)
+        if self.ffn_norm is not None:
+            h = self.ffn_norm(x)
+            x = x + self.ffn_dp(self.ffn_fc2(self.ffn_act(self.ffn_fc1(h))))
+        return x
 
 
 class BiMamba(nn.Module):
@@ -251,7 +268,8 @@ class BiMamba(nn.Module):
 
     def __init__(self, d_model: int, n_layers: int = 2, d_state: int = 32,
                  d_conv: int = 4, expand: int = 2,
-                 drop_path_rates=(0.0, 0.10), bidirectional: bool = True):
+                 drop_path_rates=(0.0, 0.10), bidirectional: bool = True,
+                 ffn_ratio: int = 0):
         super().__init__()
         if len(drop_path_rates) != n_layers:
             raise ValueError(
@@ -259,7 +277,8 @@ class BiMamba(nn.Module):
             )
         self.layers = nn.ModuleList([
             BiMambaLayer(d_model, d_state=d_state, d_conv=d_conv, expand=expand,
-                         drop_path=drop_path_rates[i], bidirectional=bidirectional)
+                         drop_path=drop_path_rates[i], bidirectional=bidirectional,
+                         ffn_ratio=ffn_ratio)
             for i in range(n_layers)
         ])
         self.norm = RMSNorm(d_model)
@@ -314,7 +333,8 @@ class BranchBackbone(nn.Module):
                  d_state: int = 32, d_conv: int = 4, expand: int = 2,
                  dp_mamba=(0.0, 0.10), bidirectional: bool = True,
                  use_pos_emb: bool = False, freq_mix: str = None,
-                 embed_drop: float = 0.1, t_max: int = 500):
+                 embed_drop: float = 0.1, t_max: int = 500,
+                 embed_hidden: int = None, ffn_ratio: int = 0):
         super().__init__()
         if freq_mix not in (None, 'mlp'):
             raise ValueError(f"freq_mix must be None or 'mlp', got {freq_mix!r}")
@@ -327,11 +347,20 @@ class BranchBackbone(nn.Module):
             for i in range(len(dilations))
         ])
         self.freq_mix = FreqMix(f2) if freq_mix == 'mlp' else None
-        self.embed = nn.Sequential(
-            nn.Linear(d_stem * f2, d_model),
-            nn.SiLU(),
-            nn.Dropout(embed_drop),
-        )
+        in_dim = d_stem * f2
+        if embed_hidden:
+            self.embed = nn.Sequential(
+                nn.Linear(in_dim, embed_hidden),
+                nn.SiLU(),
+                nn.Linear(embed_hidden, d_model),
+                nn.Dropout(embed_drop),
+            )
+        else:
+            self.embed = nn.Sequential(
+                nn.Linear(in_dim, d_model),
+                nn.SiLU(),
+                nn.Dropout(embed_drop),
+            )
         self.use_pos_emb = use_pos_emb
         self.t_max = t_max
         if use_pos_emb:
@@ -343,7 +372,8 @@ class BranchBackbone(nn.Module):
             self.pos_emb = None
         self.mamba = BiMamba(d_model, n_layers=n_mamba_layers, d_state=d_state,
                              d_conv=d_conv, expand=expand,
-                             drop_path_rates=dp_mamba, bidirectional=bidirectional)
+                             drop_path_rates=dp_mamba, bidirectional=bidirectional,
+                             ffn_ratio=ffn_ratio)
 
     def _add_pos_emb(self, x: torch.Tensor) -> torch.Tensor:
         if self.pos_emb is None:
@@ -473,6 +503,12 @@ class WavDualMamba(nn.Module):
         d_conv         : Mamba local conv1d width (default 4).
         dropout        : classifier dropout (default 0.2).
         t_max          : positional-embedding buffer length (default 500 = T2).
+        embed_hidden   : if set, adds an intermediate Linear(d_stem*f2 → embed_hidden)
+                         before the final embed projection, splitting the 3.75× compression
+                         into two stages. Default None (single-stage, current behaviour).
+        ffn_ratio      : if > 0, appends an FFN sub-block (RMSNorm → Linear(d→ratio·d)
+                         → SiLU → Linear(ratio·d→d), fc2 zero-init) after each Mamba
+                         layer. Default 0 (no FFN, current behaviour).
 
     Input  : X (B, 27, T2, F2), subband-major [LL | HL | LH] (27 = 3·M·A).
              Only the channels of the SELECTED subbands are processed.
@@ -503,6 +539,8 @@ class WavDualMamba(nn.Module):
         d_conv: int = 4,
         dropout: float = 0.2,
         t_max: int = 500,
+        embed_hidden: int = None,
+        ffn_ratio: int = 0,
     ):
         super().__init__()
         if len(dp_mamba) != n_mamba_layers:
@@ -541,6 +579,7 @@ class WavDualMamba(nn.Module):
             bidirectional=bidirectional, use_pos_emb=use_pos_emb,
             freq_mix=freq_mix, embed_drop=embed_drop,
             t_max=t_max // max(temporal_stride, 1),
+            embed_hidden=embed_hidden, ffn_ratio=ffn_ratio,
         )
         self.share_branches = share_branches
         if share_branches:
