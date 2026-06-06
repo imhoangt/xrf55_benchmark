@@ -61,7 +61,7 @@ from xrf55_bench.utils.train_utils import configure_speed_mode, set_seed
 # ── Model configs ─────────────────────────────────────────────────────────────
 
 NUM_CLASSES  = 11
-_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba', 'wavdualmamba']
+_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba', 'wavdualmamba', 'wavdualmamba_v2']
 
 
 def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
@@ -77,9 +77,10 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
     from xrf55_bench.utils.eval import evaluate, evaluate_full, measure_efficiency
 
     model_kwargs = model_kwargs or {}
-    if model_kwargs and model_name != 'wavdualmamba':
+    if model_kwargs and model_name not in ('wavdualmamba', 'wavdualmamba_v2'):
         raise ValueError(
-            f"model_kwargs is only supported for 'wavdualmamba', got {model_name!r}")
+            f"model_kwargs is only supported for 'wavdualmamba'/'wavdualmamba_v2', "
+            f"got {model_name!r}")
 
     if model_name == 'resnet':
         from xrf55_bench.models.resnet1d.model import resnet18
@@ -122,6 +123,17 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
         return dict(
             factory      = lambda: WavDualMamba(num_classes=NUM_CLASSES, **model_kwargs),
             title        = 'WavDualMamba',
+            is_2stream   = False,
+            eval_fn      = evaluate,
+            eval_full_fn = evaluate_full,
+            input_shape  = (27, 500, 15),
+            meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
+        )
+    if model_name == 'wavdualmamba_v2':
+        from xrf55_bench.models.wavdualmamba_v2.model import WavDualMambaV2
+        return dict(
+            factory      = lambda: WavDualMambaV2(num_classes=NUM_CLASSES, **model_kwargs),
+            title        = 'WavDualMambaV2',
             is_2stream   = False,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,

@@ -127,13 +127,15 @@ _PREPROC_DS = {
     'resnet':        PreprocResNetDataset,
     'tfmamba':       PreprocTFMambaDataset,
     'wavmamba':      PreprocWavMambaDataset,
-    'wavdualmamba':  PreprocWavMambaDataset,  # same data format as wavmamba
+    'wavdualmamba':   PreprocWavMambaDataset,  # same data format as wavmamba
+    'wavdualmamba_v2': PreprocWavMambaDataset,  # same data format as wavmamba
 }
 _PREPROC_SENTINEL = {
-    'resnet':        'resnet/X_train.npy',
-    'tfmamba':       'tfmamba/X_train_xh.npy',
-    'wavmamba':      'wavmamba/X_train.npy',
-    'wavdualmamba':  'wavmamba/X_train.npy',  # same files
+    'resnet':           'resnet/X_train.npy',
+    'tfmamba':          'tfmamba/X_train_xh.npy',
+    'wavmamba':         'wavmamba/X_train.npy',
+    'wavdualmamba':     'wavmamba/X_train.npy',  # same files
+    'wavdualmamba_v2':  'wavmamba/X_train.npy',  # same files
 }
 
 
