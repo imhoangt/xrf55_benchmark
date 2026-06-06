@@ -396,7 +396,7 @@ class TrunkBackbone(nn.Module):
     def __init__(self, in_ch: int, f2: int, d_mid: int = 64, d_model: int = 96,
                  dp_cnn: tuple = (0.0, 0.05), dilations: tuple = (1, 2),
                  post_dilation: int = 2, post_drop_path: float = 0.05,
-                 downsample: bool = True,
+                 downsample: bool = True, use_post: bool = True,
                  n_mamba_layers: int = 2, d_state: int = 16,
                  d_conv: int = 4, expand: int = 2,
                  dp_mamba=(0.05, 0.10), bidirectional: bool = True,
@@ -418,8 +418,9 @@ class TrunkBackbone(nn.Module):
         ])
         self.down  = TemporalDownsample(in_ch, d_mid,
                                         stride=2 if downsample else 1)
-        self.post  = TFBlock(d_mid, dilation=post_dilation,
-                             drop_path=post_drop_path)
+        self.post  = (TFBlock(d_mid, dilation=post_dilation,
+                              drop_path=post_drop_path)
+                      if use_post else None)
         self.freq_mix = FreqMix(f2) if freq_mix == 'mlp' else None
 
         in_dim = d_mid * f2
@@ -463,7 +464,8 @@ class TrunkBackbone(nn.Module):
         for blk in self.blocks:
             x = blk(x)                                   # (B, in_ch, T2, F2)
         x = self.down(x)                                 # (B, d_mid, T2', F2)
-        x = self.post(x)                                 # refine at lower resolution
+        if self.post is not None:
+            x = self.post(x)                             # refine at lower resolution
         if self.freq_mix is not None:
             x = self.freq_mix(x)
         B, C, T, Fd = x.shape
@@ -661,6 +663,7 @@ class WavDualMambaV2(nn.Module):
         embed_drop      : Dropout after embed Linear (default 0.1).
         temporal_stride : stride in stem conv time axis (default 1).
         downsample      : apply TemporalDownsample T/2 in trunk (default True). [C2]
+        use_post        : apply post-downsample TFBlock in trunk (default True).
         bidirectional   : gated backward Mamba branch (default True).
         use_pos_emb     : sinusoidal PE (default False).
         share_branches  : tie branch weights in branch mode (default False).
@@ -706,6 +709,7 @@ class WavDualMambaV2(nn.Module):
         embed_drop: float = 0.1,
         temporal_stride: int = 1,
         downsample: bool = True,
+        use_post: bool = True,
         bidirectional: bool = True,
         use_pos_emb: bool = False,
         share_branches: bool = False,
@@ -727,9 +731,10 @@ class WavDualMambaV2(nn.Module):
             raise ValueError(f"arch must be 'trunk' or 'branch', got {arch!r}")
         if len(dp_mamba) != n_mamba_layers:
             raise ValueError("len(dp_mamba) must equal n_mamba_layers")
-        if arch == 'branch' and (use_eca or downsample):
+        if arch == 'branch' and (use_eca or downsample or not use_post):
             import warnings
-            flags = [f for f, v in (('use_eca', use_eca), ('downsample', downsample)) if v]
+            flags = ([f for f, v in (('use_eca', use_eca), ('downsample', downsample)) if v]
+                     + (['use_post=False'] if not use_post else []))
             warnings.warn(
                 f"arch='branch': {flags} are ignored (trunk-only flags). "
                 "Use arch='trunk' to enable them.", UserWarning, stacklevel=2)
@@ -766,7 +771,7 @@ class WavDualMambaV2(nn.Module):
                 in_ch=in_ch, f2=f2, d_mid=d_mid, d_model=d_model,
                 dp_cnn=dp_cnn, dilations=dilations,
                 post_dilation=post_dilation, post_drop_path=post_drop_path,
-                downsample=downsample,
+                downsample=downsample, use_post=use_post,
                 n_mamba_layers=n_mamba_layers, d_state=d_state,
                 d_conv=d_conv, expand=expand, dp_mamba=dp_mamba,
                 bidirectional=bidirectional, use_pos_emb=use_pos_emb,
