@@ -60,6 +60,9 @@ Ablation flags:
     freq_mix       — None | 'mlp'. 'mlp' inserts a nonlinear MLP-Mixer over the
                      F subcarriers before flatten (zero-init ⇒ identity at step 0).
     expand, d_conv — Mamba SSM inner-expansion / local-conv width (capacity knobs).
+    use_eca        — [C7] ECA channel gate on raw 27-ch input before stems (default True).
+    pool_context   — [C8] full ECAPA [x‖μ‖σ] context pooling in AttnStatPool (default True).
+    use_final_attn — [C6] one MHSA layer after fusion, before pooling (default False).
 """
 
 from __future__ import annotations
@@ -178,6 +181,25 @@ class TFBlock(nn.Module):
         y = self.dw_f(self.dw_t(y))
         y = self.pw(self.act(y))
         return x + self.dp(y)
+
+
+# ─── [C7] Efficient Channel Attention (ECA) — applied on raw 27-ch input ────────
+
+class ECA(nn.Module):
+    """[C7] Efficient Channel Attention (~5 params). Applied on raw input before stems.
+
+    GAP over (T, F) → Conv1d(k=5) → sigmoid → per-channel scale.
+    Input / Output: (B, C, T, F) — 4D, same shape.
+    """
+
+    def __init__(self, k: int = 5):
+        super().__init__()
+        self.conv = nn.Conv1d(1, 1, k, padding=k // 2, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = x.mean(dim=(2, 3))                                   # (B, C) global avg
+        y = torch.sigmoid(self.conv(y.unsqueeze(1))).squeeze(1)  # (B, C) weights
+        return x * y.unsqueeze(-1).unsqueeze(-1)                 # (B, C, T, F) scale
 
 
 # ─── Bidirectional Mamba with per-channel zero-init gated fwd/bwd merge ────────
@@ -429,28 +451,64 @@ class AdaptiveFusion(nn.Module):
         return out                                       # (B, T, d)
 
 
+# ─── [C6] FinalAttention — optional MHSA after fusion, before pooling ────────────
+
+class FinalAttention(nn.Module):
+    """[C6] Pre-norm MHSA after AdaptiveFusion, before temporal pooling.
+
+    out_proj zero-init → residual starts as identity at step 0 (MambaVision-style).
+    Default OFF (use_final_attn=False). Input / Output: (B, T, d_model).
+    """
+
+    def __init__(self, d_model: int, n_heads: int = 4,
+                 attn_drop: float = 0.1, drop_path: float = 0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, n_heads,
+                                          dropout=attn_drop, batch_first=True)
+        nn.init.zeros_(self.attn.out_proj.weight)
+        nn.init.zeros_(self.attn.out_proj.bias)
+        self.dp = DropPath(drop_path)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.norm(x)
+        h, _ = self.attn(h, h, h, need_weights=False)
+        return x + self.dp(h)
+
+
 # ─── Temporal attentive statistics pooling (ECAPA-style, zero-init) ───────────
 
 class AttnStatPool(nn.Module):
     """Per-channel temporal attention → [weighted mean ‖ weighted std].
 
     Input : (B, T, d)    Output: (B, 2*d)
+
+    context=True  [C8]: score sees [x‖μ‖σ] (3×dim input, full ECAPA style).
+    context=False      : score sees x only (old v1 behaviour).
     """
 
-    def __init__(self, dim: int, bn: int = None):
+    def __init__(self, dim: int, bn: int = None, context: bool = True):
         super().__init__()
+        self.context = context
         bn = bn or max(8, dim // 2)
+        in_dim = 3 * dim if context else dim
         self.score = nn.Sequential(
-            nn.Linear(dim, bn), nn.Tanh(), nn.Linear(bn, dim)
+            nn.Linear(in_dim, bn), nn.Tanh(), nn.Linear(bn, dim)
         )
         nn.init.zeros_(self.score[-1].weight)            # uniform attention init
         nn.init.zeros_(self.score[-1].bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w = self.score(x).softmax(dim=1)                 # (B, T, d)
+        if self.context:
+            mu = x.mean(dim=1, keepdim=True).expand_as(x)
+            sg = x.var(dim=1, keepdim=True, unbiased=False).clamp(min=1e-6).sqrt().expand_as(x)
+            h = torch.cat([x, mu, sg], dim=-1)          # (B, T, 3*d)
+        else:
+            h = x
+        w = self.score(h).softmax(dim=1)                 # (B, T, d)
         mean = (w * x).sum(dim=1)                        # (B, d)
         var = (w * (x - mean.unsqueeze(1)).pow(2)).sum(dim=1)
-        return torch.cat([mean, (var + 1e-6).sqrt()], dim=-1)
+        return torch.cat([mean, var.clamp(min=1e-6).sqrt()], dim=-1)
 
 
 # ─── Classifier head ──────────────────────────────────────────────────────────
@@ -509,6 +567,15 @@ class WavDualMamba(nn.Module):
         ffn_ratio      : if > 0, appends an FFN sub-block (RMSNorm → Linear(d→ratio·d)
                          → SiLU → Linear(ratio·d→d), fc2 zero-init) after each Mamba
                          layer. Default 0 (no FFN, current behaviour).
+        use_eca        : [C7] ECA channel gate on raw 27-ch input before stems.
+                         Default True. Set False to reproduce old v1 behaviour.
+        pool_context   : [C8] pass [x‖μ‖σ] into AttnStatPool score (full ECAPA).
+                         Default True. Set False to reproduce old v1 behaviour.
+        use_final_attn : [C6] insert one MHSA layer after fusion, before pooling.
+                         Default False (off); True enables the ablation.
+        attn_heads     : number of MHSA heads for FinalAttention (default 4).
+        attn_drop      : attention dropout in FinalAttention (default 0.1).
+        attn_drop_path : DropPath rate for FinalAttention residual (default 0.1).
 
     Input  : X (B, 27, T2, F2), subband-major [LL | HL | LH] (27 = 3·M·A).
              Only the channels of the SELECTED subbands are processed.
@@ -541,6 +608,12 @@ class WavDualMamba(nn.Module):
         t_max: int = 500,
         embed_hidden: int = None,
         ffn_ratio: int = 0,
+        use_eca: bool = True,
+        pool_context: bool = True,
+        use_final_attn: bool = False,
+        attn_heads: int = 4,
+        attn_drop: float = 0.1,
+        attn_drop_path: float = 0.1,
     ):
         super().__init__()
         if len(dp_mamba) != n_mamba_layers:
@@ -591,8 +664,12 @@ class WavDualMamba(nn.Module):
                 s: BranchBackbone(**bb_kwargs) for s in self.subbands
             })
 
+        self.eca = ECA() if use_eca else None
         self.fusion = AdaptiveFusion(d_model, self.n_branches)
-        self.tpool  = AttnStatPool(d_model)
+        self.final_attn = (FinalAttention(d_model, n_heads=attn_heads,
+                                          attn_drop=attn_drop, drop_path=attn_drop_path)
+                           if use_final_attn else None)
+        self.tpool  = AttnStatPool(d_model, context=pool_context)
         self.head   = Classifier(2 * d_model, num_classes=num_classes,
                                  dropout=dropout)
 
@@ -618,6 +695,9 @@ class WavDualMamba(nn.Module):
                 f"your DWT output."
             )
 
+        if self.eca is not None:
+            X = self.eca(X)                                         # [C7] ECA on raw 27-ch
+
         # Per-subband stems (always separate, physical kernels).
         stem_outs = []
         for s in self.subbands:
@@ -637,6 +717,8 @@ class WavDualMamba(nn.Module):
                        for k, s in enumerate(self.subbands)]
 
         z = self.fusion(streams)                                    # (B, T2, d_model)
+        if self.final_attn is not None:
+            z = self.final_attn(z)                                  # [C6] optional MHSA
         z = self.tpool(z)                                           # (B, 2*d_model)
         return self.head(z)                                         # (B, num_classes)
 
