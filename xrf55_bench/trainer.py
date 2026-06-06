@@ -71,15 +71,15 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
     input_shapes lists each forward argument's shape (no batch dim).
 
     model_kwargs: extra constructor kwargs forwarded to the model factory.
-        Currently only 'wavdualmamba' accepts them (e.g. subbands, share_branches,
-        use_pos_emb, bidirectional, d_model, ...) — used to run ablations.
+        Supported for 'wavdualmamba' and 'wavdualmamba_v2' (e.g. arch, subbands,
+        d_model, d_state, ffn_ratio, use_final_attn, ...) — used for ablations.
     """
     from xrf55_bench.utils.eval import evaluate, evaluate_full, measure_efficiency
 
     model_kwargs = model_kwargs or {}
     if model_kwargs and model_name not in ('wavdualmamba', 'wavdualmamba_v2'):
         raise ValueError(
-            f"model_kwargs is only supported for 'wavdualmamba'/'wavdualmamba_v2', "
+            f"model_kwargs is only supported for 'wavdualmamba' / 'wavdualmamba_v2', "
             f"got {model_name!r}")
 
     if model_name == 'resnet':

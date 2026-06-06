@@ -727,6 +727,12 @@ class WavDualMambaV2(nn.Module):
             raise ValueError(f"arch must be 'trunk' or 'branch', got {arch!r}")
         if len(dp_mamba) != n_mamba_layers:
             raise ValueError("len(dp_mamba) must equal n_mamba_layers")
+        if arch == 'branch' and (use_eca or downsample):
+            import warnings
+            flags = [f for f, v in (('use_eca', use_eca), ('downsample', downsample)) if v]
+            warnings.warn(
+                f"arch='branch': {flags} are ignored (trunk-only flags). "
+                "Use arch='trunk' to enable them.", UserWarning, stacklevel=2)
 
         sel     = [s for s in _SUBBAND_ORDER if s in subbands]
         unknown = [s for s in subbands if s not in _SUBBAND_ORDER]
