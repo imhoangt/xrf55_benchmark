@@ -197,7 +197,7 @@ class ECA(nn.Module):
     Input / Output: (B, C, T, F).
     """
 
-    def __init__(self, k: int = 3):
+    def __init__(self, k: int = 5):
         super().__init__()
         self.conv = nn.Conv1d(1, 1, k, padding=k // 2, bias=False)
 
