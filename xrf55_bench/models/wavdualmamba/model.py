@@ -186,13 +186,15 @@ class TFBlock(nn.Module):
 # ─── [C7] Efficient Channel Attention (ECA) — applied on raw 27-ch input ────────
 
 class ECA(nn.Module):
-    """[C7] Efficient Channel Attention (~5 params). Applied on raw input before stems.
+    """[C7] Efficient Channel Attention. Applied on raw input before stems.
 
-    GAP over (T, F) → Conv1d(k=5) → sigmoid → per-channel scale.
+    GAP over (T, F) → Conv1d(k) → sigmoid → per-channel scale.
+    k default=3: ECA-Net adaptive formula gives k=3 for C=27 channels, and
+    k=3 avoids crossing subband boundaries (LL|HL|LH each 9-ch) unlike k=5.
     Input / Output: (B, C, T, F) — 4D, same shape.
     """
 
-    def __init__(self, k: int = 5):
+    def __init__(self, k: int = 3):
         super().__init__()
         self.conv = nn.Conv1d(1, 1, k, padding=k // 2, bias=False)
 
