@@ -1,9 +1,17 @@
-"""Seeding + runtime speed configuration for the XRF55 benchmark."""
+"""Seeding, runtime speed configuration, and checkpoint I/O for the XRF55 benchmark."""
 import os
 import random
 
 import numpy as np
 import torch
+
+
+def torch_load_checkpoint(path, map_location=None):
+    """Load checkpoints with weights_only=False when supported."""
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
 
 
 def set_seed(seed=42):

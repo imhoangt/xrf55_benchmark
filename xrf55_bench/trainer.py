@@ -54,8 +54,9 @@ from xrf55_bench.reporting import (
     save_combined_zip, build_metrics, save_metrics,
     build_run_config, save_run_config,
 )
-from xrf55_bench.utils.amp_utils   import torch_load_checkpoint
-from xrf55_bench.utils.train_utils import configure_speed_mode, set_seed
+from xrf55_bench.utils.train_utils import (
+    configure_speed_mode, set_seed, torch_load_checkpoint,
+)
 
 
 # ── Model configs ─────────────────────────────────────────────────────────────
