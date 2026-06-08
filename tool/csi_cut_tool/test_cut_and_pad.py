@@ -7,7 +7,7 @@ import os
 import struct
 import tempfile
 
-import csi_tool
+import tool.csi_cut_tool.csi_tool as csi_tool
 
 PSIZE = 144  # esp packet size
 
