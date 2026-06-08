@@ -27,7 +27,11 @@ xrf55_bench/outputs/local_plots/*
 # 1c. csi_cut_tool — raw collection data + tool output (keep on disk, never commit)
 # =========================
 # Sample/real capture sessions (raw_*.bin, action_events.csv, video.mp4, ...).
+# Tool moved to tool/csi_cut_tool/ (2026-06-08); keep both paths for safety.
 csi_cut_tool/sample_data/
+tool/csi_cut_tool/sample_data/
+# Plot-mode (func=plot) PNG output.
+tool/csi_cut_tool/plot_output/
 # Cut/synced output the tool writes to its working dir, at any location.
 Cut_Data/
 

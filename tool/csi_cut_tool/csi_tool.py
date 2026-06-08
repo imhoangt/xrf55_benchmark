@@ -1,7 +1,16 @@
 import struct
+import os
+import sys
+
 import numpy as np
 import pandas as pd
-import os
+
+# Console Windows mặc định cp1252 không in được tiếng Việt → ép UTF-8.
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except (AttributeError, ValueError):
+    pass
 
 
 PACKET_COUNT = 1000
@@ -23,6 +32,33 @@ DEFAULT_TOL_US  = 1_000_000     # 1s: dung sai timestamp khi khớp điểm neo
 MAX_FWD_SKIP    = 100           # nếu gói target_seq mất, chấp nhận gói vượt trước ≤ MAX_FWD_SKIP seq
 MAX_FWD_GAP     = SEQ_MAX // 2  # ranh giới tròn: seq_diff ≤ ngưỡng ⇒ vượt trước (mất gói);
                                 # lớn hơn ⇒ lùi sau (gói trùng / đảo thứ tự)
+
+# ── Cấu hình cho chế độ PLOT (chức năng 3) ────────────────────────────────────────
+# Thư mục dữ liệu mặc định (chứa các folder phiên). Sửa 1 dòng này nếu đổi chỗ.
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sample_data')
+
+DEVICE_ANTENNAS = {'esp': 1, 'asus': 4}   # số antenna mỗi thiết bị
+N_SUBCARRIER    = 64
+VIZ_SUBCARRIER  = 10                       # subcarrier (0-index) cho đồ thị 1D
+_DUR_S = 5.0                               # 1000 gói @ 200 Hz → 0–5 s
+_FS    = 200.0
+
+# Danh mục hành động (menu) → action_name trong action_events.csv.
+# *** Bảng map tạm (đoán) — sửa cột phải khi biết tên CSV chính xác. ***
+ACTION_CATALOG = [
+    ('sitdown',      'ngoi'),
+    ('standup',      'dung'),
+    ('pickup',       'cui_nhat'),
+    ('fall',         'nga'),
+    ('liestill',     'nam_yen'),
+    ('walk',         'di'),
+    ('run',          'chay'),
+    ('emptyroom',    'phong_trong'),
+    ('chuan_bi_lai', 'chuan_bi_lai'),
+]
+
+# Kích thước figure: mỗi hàng (1 RX) cao 4; 1-panel rộng 12, 2-panel rộng 16.
+_FIG_W_1P, _FIG_W_2P, _FIG_H_ROW = 12, 16, 4
 
 
 def _packet_count(file_path: str, packet_size: int) -> int:
@@ -113,19 +149,18 @@ def find_first_packet_fast(file_path: str, target_time: int, packet_size: int, e
                 low = mid + 1
                 
     if best_index != -1:
-        data_to_save = {
-            "Sequence": [best_seq],
-            "Timestamp": [best_ts],
-            "Target_Time_Input": [target_time],
-            "Time_Difference": [best_ts - target_time]
-        }
-        
-        try:
-            pd.DataFrame(data_to_save).to_excel(excel_output, index=False)
-            print(f" -> Seq: {best_seq} | TS: {best_ts}")
-        except Exception as e:
-            print(f" -> [Lỗi] Không thể ghi file Excel: {e}")
-            
+        if excel_output is not None:
+            data_to_save = {
+                "Sequence": [best_seq],
+                "Timestamp": [best_ts],
+                "Target_Time_Input": [target_time],
+                "Time_Difference": [best_ts - target_time]
+            }
+            try:
+                pd.DataFrame(data_to_save).to_excel(excel_output, index=False)
+            except Exception as e:
+                print(f" -> [Lỗi] Không thể ghi file Excel: {e}")
+        print(f" -> Seq: {best_seq} | TS: {best_ts}")
         return best_seq, best_ts
             
     print(f" -> [Thất bại] Không có gói tin nào phù hợp.")
@@ -193,9 +228,9 @@ def find_anchor_offset(file_path: str, target_seq: int, target_ts: int, packet_s
             f.seek(current_offset + packet_size)   # nhảy tới gói kế (bỏ qua payload)
     return None
 
-def cut_and_pad_1000(file_in: str, start_offset: int, target_seq: int, packet_size: int,
-                     out_filename: str, max_forward_gap: int = MAX_FWD_GAP):
-    """Cắt đúng PACKET_COUNT gói liên tiếp từ start_offset, căn theo lưới seq bắt đầu
+def _cut_and_pad_bytes(file_in: str, start_offset: int, target_seq: int, packet_size: int,
+                       max_forward_gap: int = MAX_FWD_GAP) -> bytes:
+    """Lõi cắt: trả về đúng PACKET_COUNT gói (dạng bytes) căn theo lưới seq bắt đầu
     tại target_seq; đệm gói 0 cho mỗi seq bị mất để 3 receiver thẳng hàng.
 
     Phân biệt 2 ca không khớp seq (mấu chốt — đừng gộp chung):
@@ -242,9 +277,15 @@ def cut_and_pad_1000(file_in: str, start_offset: int, target_seq: int, packet_si
                 # Gói trùng / đảo thứ tự (seq lùi sau): bỏ, đọc tiếp — KHÔNG seek lùi.
                 continue
 
-    with open(out_filename, 'wb') as f_out:
-        f_out.write(output_data)
+    return bytes(output_data)
 
+
+def cut_and_pad_1000(file_in: str, start_offset: int, target_seq: int, packet_size: int,
+                     out_filename: str, max_forward_gap: int = MAX_FWD_GAP):
+    """Cắt PACKET_COUNT gói rồi GHI ra file (bọc quanh _cut_and_pad_bytes)."""
+    data = _cut_and_pad_bytes(file_in, start_offset, target_seq, packet_size, max_forward_gap)
+    with open(out_filename, 'wb') as f_out:
+        f_out.write(data)
     print(f"[Thành công] Đã cắt {PACKET_COUNT} gói -> {out_filename}")
 
 def sync_and_cut_3_files(file1, file2, file3,target_seq: int, target_ts: int, packet_size: int, dev_type: str, base_out_name: str, output_dir: str):
@@ -272,114 +313,412 @@ def sync_and_cut_3_files(file1, file2, file3,target_seq: int, target_ts: int, pa
             with open(out_name, 'wb') as f_out:
                 f_out.write(b'\x00' * packet_size * PACKET_COUNT)
 
-def extract_csi_matrix(file_paths: list, dev_type: str):
-    """
-    Trích xuất ma trận biên độ và pha tùy theo loại thiết bị (ESP hoặc ASUS).
-    """
-    results = []
+def _dtype(dev_type: str) -> np.dtype:
+    """dtype của 1 gói theo thiết bị (header + payload)."""
+    if dev_type == 'esp':
+        return np.dtype([
+            ('seq', '<u2'), ('timestamp', '<u8'), ('channel', '<u2'),
+            ('agc', 'u1'), ('fft', 'u1'), ('noise', 'i1'), ('rssi', 'i1'),
+            ('payload', 'i1', (128,))      # 64 subcarrier × (q, i)
+        ])
+    return np.dtype([
+        ('seq', '<u2'), ('timestamp', '<u8'), ('channel', '<u2'),
+        ('agc_gain', 'u1', (4,)), ('rssi', 'i1', (4,)),
+        ('payload', '<u4', (256,))         # 4 anten × 64 sub × 4 byte
+    ])
 
+
+def _decode_amp_phase(data: np.ndarray, dev_type: str):
+    """Giải mã biên độ + pha từ mảng cấu trúc đã đọc.
+
+    ESP : payload i8 [q0,i0,q1,i1,…] → amp/phase (N, 64).
+    ASUS: payload u32 (Nexmon, design_note mục 2.1) → amp/phase (N, 4, 64).
+          bit 29=sign I, 28:18=mantissa I, 17=sign Q, 16:6=mantissa Q,
+          5:0=exponent (bù-2 6-bit); E=e+10; I=(-1)^sI·MI·2^E; underflow E<-12→0.
+    """
+    if dev_type == 'esp':
+        Q = data['payload'][:, 0::2].astype(np.float32)        # chẵn = q (ảo)
+        I = data['payload'][:, 1::2].astype(np.float32)        # lẻ  = i (thực)
+        amplitude = np.sqrt(I**2 + Q**2)
+        phase = np.arctan2(Q, I)
+        return amplitude, phase                                # (N, 64)
+
+    csi_raw = data['payload']                                  # (N, 256) uint32
+    e_raw = csi_raw & 0x3F
+    e = np.where(e_raw >= 32, e_raw.astype(np.int32) - 64, e_raw.astype(np.int32))
+    E = e + 10
+    m_i = ((csi_raw >> 18) & 0x7FF).astype(np.int64)          # bit 28:18
+    s_i = ((csi_raw >> 29) & 0x1).astype(np.int32)            # bit 29
+    m_q = ((csi_raw >>  6) & 0x7FF).astype(np.int64)          # bit 16:6
+    s_q = ((csi_raw >> 17) & 0x1).astype(np.int32)            # bit 17
+    scale = np.power(2.0, E.astype(np.float32))
+    I = (1 - 2 * s_i) * m_i * scale                           # M·2^E (KHÔNG +1)
+    Q = (1 - 2 * s_q) * m_q * scale
+    under = E < -12                                            # underflow → 0
+    I = np.where(under, 0.0, I)
+    Q = np.where(under, 0.0, Q)
+    amplitude = np.sqrt(I**2 + Q**2).reshape(-1, 4, 64)       # ant-major
+    phase = np.arctan2(Q, I).reshape(-1, 4, 64)
+    return amplitude, phase
+
+
+def extract_csi_matrix(file_paths: list, dev_type: str):
+    """Trích xuất ma trận biên độ và pha từ các file đã cắt (ESP hoặc ASUS)."""
+    results = []
     for rx_idx, file_path in enumerate(file_paths):
         if not os.path.exists(file_path):
             print(f"[Lỗi] Không tìm thấy file đã cắt: {file_path}")
             results.append(None)
             continue
-            
         print(f"Đang phân tích ({dev_type.upper()}) cho Rx{rx_idx + 1}...")
-        
-        if dev_type == 'esp':
-            # --- ESP ---
-            esp_dtype = np.dtype([
-                ('seq', '<u2'), ('timestamp', '<u8'), ('channel', '<u2'),
-                ('agc', 'u1'), ('fft', 'u1'), ('noise', 'i1'), ('rssi', 'i1'),
-                ('payload', 'i1', (128,)) # 64 subcarriers * 2
-            ])
-            data = np.fromfile(file_path, dtype=esp_dtype)
-            Q_float = data['payload'][:, 0::2].astype(np.float32)
-            I_float = data['payload'][:, 1::2].astype(np.float32)
-            
-            amplitude = np.sqrt(I_float**2 + Q_float**2)
-            phase = np.arctan2(Q_float, I_float)
-            
-            rx_data = {
-                'rx_index': rx_idx,
-                'timestamp': data['timestamp'], 
-                'amplitude': amplitude, # Shape: (1000, 64)
-                'phase': phase          # Shape: (1000, 64)
-            }
-            results.append(rx_data)
-
-        elif dev_type == 'asus':
-            # --- ASUS ---
-            asus_dtype = np.dtype([
-                ('seq', '<u2'), ('timestamp', '<u8'), ('channel', '<u2'),
-                ('agc_gain', 'u1', (4,)), ('rssi', 'i1', (4,)),
-                ('payload', '<u4', (256,)) # 4 Anten * 64 Sub * 4 Byte = 256 phần tử UInt32
-            ])
-            data = np.fromfile(file_path, dtype=asus_dtype)
-            csi_raw = data['payload'] # Shape: (1000, 256)
-            
-            # 1. Trích xuất bit cho Q
-            s_q = (csi_raw >> 29) & 0x01
-            m_q = (csi_raw >> 18) & 0x07ff
-            e   = csi_raw & 0x3f  # Dùng chung số mũ cho cả I và Q
-            
-            # 2. Trích xuất bit cho I
-            s_i = (csi_raw >> 17) & 0x01
-            m_i = (csi_raw >> 6) & 0x07ff
-            
-            # 3. Tính toán giá trị thực (Vectorized)
-            # Tối ưu hóa (-1)^s thành (1 - 2*s) để Numpy tính nhanh hơn
-            sign_q = 1 - 2 * s_q 
-            sign_i = 1 - 2 * s_i 
-            
-            # Ép kiểu e sang float32 trước khi dùng phép lũy thừa số âm
-            exponent = 2.0 ** (e.astype(np.float32) - 127)
-            
-            Q_float = sign_q * (1 + m_q) * exponent
-            I_float = sign_i * (1 + m_i) * exponent
-            
-            # 4. Tính Biên độ và Pha
-            amplitude = np.sqrt(I_float**2 + Q_float**2)
-            phase = np.arctan2(Q_float, I_float)
-            
-            # 5. Định hình lại mảng (Reshape) để phân tách rõ 4 Anten
-            # Biến mảng (1000, 256) thành (1000, 4, 64)
-            amplitude = amplitude.reshape(-1, 4, 64)
-            phase = phase.reshape(-1, 4, 64)
-            
-            rx_data = {
-                'rx_index': rx_idx,
-                'timestamp': data['timestamp'], 
-                'amplitude': amplitude, # Shape: (1000, 4, 64)
-                'phase': phase          # Shape: (1000, 4, 64)
-            }
-            results.append(rx_data)
-            
+        data = np.fromfile(file_path, dtype=_dtype(dev_type))
+        amplitude, phase = _decode_amp_phase(data, dev_type)
+        results.append({
+            'rx_index': rx_idx,
+            'timestamp': data['timestamp'],
+            'amplitude': amplitude,    # ESP (1000,64) | ASUS (1000,4,64)
+            'phase': phase,
+        })
     print("[Thành công] Đã trích xuất xong mảng đa chiều!")
     return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CHỨC NĂNG 3 — PLOT (gộp: chọn mẫu → cắt+giải mã trong RAM → vẽ, kiểu plot_tool)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _scan_sessions(data_dir: str) -> list:
+    """Quét data_dir, trả list các phiên {folder, name, cfg} đọc từ session_config.json."""
+    import json
+    out = []
+    if not os.path.isdir(data_dir):
+        return out
+    for name in sorted(os.listdir(data_dir)):
+        cfg_path = os.path.join(data_dir, name, 'session_config.json')
+        if not os.path.isfile(cfg_path):
+            continue
+        try:
+            with open(cfg_path, encoding='utf-8') as f:
+                cfg = json.load(f)
+        except Exception:
+            continue
+        out.append({'folder': os.path.join(data_dir, name), 'name': name, 'cfg': cfg})
+    return out
+
+
+def _process_amp(amp: np.ndarray) -> np.ndarray:
+    """Tiền xử lý biên độ: Hampel (window=8, n_sigma=3) + Butterworth LPF (4, 20Hz).
+
+    amp: (T, 64), lọc dọc trục thời gian (axis 0).
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+    from scipy.signal import butter, sosfiltfilt
+    w = 8
+    x = amp.astype(np.float32)
+    xpad = np.pad(x, ((w, w), (0, 0)), mode='reflect')
+    xw = sliding_window_view(xpad, 2 * w + 1, axis=0)          # (T, 64, 2w+1)
+    med = np.median(xw, axis=-1)
+    mad = np.maximum(np.median(np.abs(xw - med[..., None]), axis=-1), 1e-6)
+    x = np.where(np.abs(x - med) > 3.0 * 1.4826 * mad, med, x).astype(np.float32)
+    sos = butter(4, 20.0, btype='low', fs=_FS, output='sos')
+    return sosfiltfilt(sos, x, axis=0).astype(np.float32)
+
+
+def _load_action_csi(folder, dev_type, rx_list, ant, action_name, repeat, with_proc):
+    """Cắt + giải mã 1 hành động (đồng bộ theo seq) cho các RX đã chọn, đã chọn antenna.
+
+    Trả list dict {rx, amp (1000,64), ph (1000,64), proc (1000,64)|None}, hoặc None nếu lỗi.
+    """
+    pkt = DEVICE_CONFIG[dev_type]['packet_size']
+    event_file = os.path.join(folder, 'action_events.csv')
+    ts = get_time_from_event(event_file, action_name, repeat)
+    if ts is None:
+        return None
+    # Neo đồng bộ lấy từ RX đầu tiên được chọn (seq dùng chung mọi RX).
+    ref_file = os.path.join(folder, f'raw_{dev_type}{rx_list[0]}.bin')
+    seq0, ts0 = find_first_packet_fast(ref_file, ts, pkt, excel_output=None)
+    if seq0 is None:
+        return None
+    chans = []
+    for rx in rx_list:
+        fpath = os.path.join(folder, f'raw_{dev_type}{rx}.bin')
+        off = find_anchor_offset(fpath, seq0, ts0, pkt) if os.path.exists(fpath) else None
+        raw = _cut_and_pad_bytes(fpath, off, seq0, pkt) if off is not None \
+            else b'\x00' * pkt * PACKET_COUNT
+        data = np.frombuffer(raw, dtype=_dtype(dev_type))
+        amp, ph = _decode_amp_phase(data, dev_type)
+        if dev_type == 'asus':                                # (N,4,64) → chọn antenna
+            amp, ph = amp[:, ant - 1, :], ph[:, ant - 1, :]
+        chans.append({'rx': rx, 'amp': amp, 'ph': ph,
+                      'proc': _process_amp(amp) if with_proc else None})
+    return chans
+
+
+def _suptitle(meta, subcarrier=None, all_sc=False):
+    parts = [
+        meta['action_label'], meta['dev'].upper(),
+        (f"Room {meta['room']:02d} · Setup {meta['setup']:02d} · "
+         f"Session {meta['session']:02d} · User {meta['user']:02d} · Pos {meta['pos']:02d}"),
+        f"Rx {meta['rx_label']}", f"Ant {meta['ant']:02d}",
+    ]
+    if all_sc:
+        parts.append(f"All {N_SUBCARRIER} Subcarriers")
+    elif subcarrier is not None:
+        parts.append(f"Subcarrier {subcarrier + 1}/{N_SUBCARRIER}")
+    parts.append(f"Rep {meta['repeat']:02d}")
+    return "  |  ".join(parts)
+
+
+def _row_title(base, rx, n):
+    return f"Rx {rx:02d} — {base}" if n > 1 else base
+
+
+def _plot_amp_1d(chans, meta, out_path, with_proc):
+    import matplotlib.pyplot as plt
+    sc, n = VIZ_SUBCARRIER, len(chans)
+    t = np.linspace(0, _DUR_S, chans[0]['amp'].shape[0], endpoint=False)
+    base = ('CSI Amplitude raw and after preprocessing' if with_proc else 'Raw CSI Amplitude')
+    fig, axes = plt.subplots(n, 1, figsize=(_FIG_W_1P, _FIG_H_ROW * n),
+                             squeeze=False, sharex=True)
+    for i, ch in enumerate(chans):
+        ax = axes[i, 0]
+        ax.plot(t, ch['amp'][:, sc], color='steelblue', lw=0.8, alpha=0.8,
+                label='Raw CSI Amplitude')
+        if with_proc:
+            ax.plot(t, ch['proc'][:, sc], color='darkorange', lw=1.2,
+                    label='After Hampel + Butterworth LPF')
+        ax.set_ylabel('Amplitude')
+        ax.set_title(_row_title(base, ch['rx'], n))
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+    axes[-1, 0].set_xlabel('Time (s)')
+    fig.suptitle(_suptitle(meta, subcarrier=sc), fontsize=10)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+def _plot_amp_heatmap(chans, meta, out_path, with_proc):
+    import matplotlib.pyplot as plt
+    n = len(chans)
+    ncol = 2 if with_proc else 1
+    width = _FIG_W_2P if with_proc else _FIG_W_1P
+    fig, axes = plt.subplots(n, ncol, figsize=(width, _FIG_H_ROW * n), squeeze=False)
+    for i, ch in enumerate(chans):
+        cells = [(ch['amp'], 'Raw CSI Amplitude')]
+        if with_proc:
+            cells.append((ch['proc'], 'CSI Amplitude after Hampel + Butterworth LPF'))
+        for j, (mat, title) in enumerate(cells):
+            ax = axes[i, j]
+            # Thang màu bền với vài subcarrier rác (vd DC/null trung tâm của ASUS có
+            # giá trị khổng lồ): 99th-pct theo TỪNG subcarrier rồi median → 1 subcarrier
+            # outlier không kéo lệch toàn bộ thang.
+            vmin = float(mat.min())
+            vmax = float(np.median(np.percentile(mat, 99, axis=0)))
+            if not np.isfinite(vmax) or vmax <= vmin:
+                vmax = float(np.percentile(mat, 99))
+            im = ax.imshow(mat.T, aspect='auto', origin='lower', cmap='viridis',
+                           vmin=vmin, vmax=vmax, extent=[0, _DUR_S, 0, N_SUBCARRIER - 1])
+            ax.set_title(_row_title(title, ch['rx'], n))
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Subcarrier')
+            plt.colorbar(im, ax=ax, fraction=0.046)
+    fig.suptitle(_suptitle(meta, all_sc=True), fontsize=10)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+def _plot_phase_1d(chans, meta, out_path):
+    import matplotlib.pyplot as plt
+    sc, n = VIZ_SUBCARRIER, len(chans)
+    t = np.linspace(0, _DUR_S, chans[0]['ph'].shape[0], endpoint=False)
+    fig, axes = plt.subplots(n, 1, figsize=(_FIG_W_1P, _FIG_H_ROW * n),
+                             squeeze=False, sharex=True)
+    for i, ch in enumerate(chans):
+        ax = axes[i, 0]
+        ax.plot(t, ch['ph'][:, sc], color='steelblue', lw=0.8, alpha=0.8,
+                label='Raw CSI Phase')
+        ax.set_ylabel('Phase (rad)')
+        ax.set_title(_row_title('Raw CSI Phase', ch['rx'], n))
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+    axes[-1, 0].set_xlabel('Time (s)')
+    fig.suptitle(_suptitle(meta, subcarrier=sc), fontsize=10)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+def _plot_phase_heatmap(chans, meta, out_path):
+    import matplotlib.pyplot as plt
+    n = len(chans)
+    fig, axes = plt.subplots(n, 1, figsize=(_FIG_W_1P, _FIG_H_ROW * n), squeeze=False)
+    for i, ch in enumerate(chans):
+        ax = axes[i, 0]
+        mat = ch['ph']
+        vmax = float(np.percentile(np.abs(mat), 99))
+        im = ax.imshow(mat.T, aspect='auto', origin='lower', cmap='RdBu_r',
+                       vmin=-vmax, vmax=vmax, extent=[0, _DUR_S, 0, N_SUBCARRIER - 1])
+        ax.set_title(_row_title('Raw CSI Phase', ch['rx'], n))
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Subcarrier')
+        plt.colorbar(im, ax=ax, fraction=0.046)
+    fig.suptitle(_suptitle(meta, all_sc=True), fontsize=10)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+def _ask_int(prompt, lo, hi):
+    while True:
+        s = input(prompt).strip()
+        try:
+            v = int(s)
+        except ValueError:
+            print(f"   -> Nhập số nguyên trong [{lo}, {hi}].")
+            continue
+        if lo <= v <= hi:
+            return v
+        print(f"   -> Ngoài khoảng [{lo}, {hi}].")
+
+
+def _ask_int_list(prompt, lo, hi):
+    import re
+    while True:
+        toks = [t for t in re.split(r'[,\s]+', input(prompt).strip()) if t]
+        try:
+            vals = [int(t) for t in toks]
+        except ValueError:
+            print(f"   -> Nhập các số trong [{lo}, {hi}], cách bởi dấu phẩy."); continue
+        if vals and all(lo <= v <= hi for v in vals):
+            return sorted(set(vals))
+        print(f"   -> Mỗi giá trị phải trong [{lo}, {hi}] và không rỗng.")
+
+
+def _ask_yesno(prompt):
+    while True:
+        s = input(prompt).strip().lower()
+        if s in ('y', 'yes', 'c', 'co', 'có', '1'):
+            return True
+        if s in ('n', 'no', 'k', 'khong', 'không', '0'):
+            return False
+        print("   -> Nhập y/n.")
+
+
+def run_plot_mode(dev_type: str):
+    """Chế độ vẽ: chọn mẫu theo chỉ số → cắt+giải mã trong RAM → vẽ 4 đồ thị."""
+    import matplotlib
+    matplotlib.use('Agg')
+
+    sessions = _scan_sessions(DATA_DIR)
+    if not sessions:
+        print(f"[Lỗi] Không thấy phiên nào (session_config.json) trong: {DATA_DIR}")
+        return
+
+    room    = _ask_int("3. Chọn phòng    (room): ", 1, 99)
+    setup   = _ask_int("4. Chọn setup           : ", 1, 99)
+    session = _ask_int("5. Chọn phiên   (session): ", 1, 99)
+    user    = _ask_int("6. Chọn người     (user): ", 1, 99)
+    pos     = _ask_int("7. Chọn vị trí     (pos): ", 1, 99)
+
+    matches = [s for s in sessions if (
+        s['cfg'].get('room_id') == room and s['cfg'].get('setup_id') == setup and
+        s['cfg'].get('session_no') == session and s['cfg'].get('person_id') == user and
+        s['cfg'].get('position_id') == pos)]
+    if not matches:
+        print(f"[Lỗi] Không có phiên khớp (room={room}, setup={setup}, session={session}, "
+              f"user={user}, pos={pos}).")
+        return
+    if len(matches) == 1:
+        sel = matches[0]
+    else:
+        print("   Nhiều phiên khớp — chọn một:")
+        for i, s in enumerate(matches, 1):
+            print(f"     {i:02d}. {s['cfg'].get('scenario', '?')}   ({s['name']})")
+        sel = matches[_ask_int("   -> Chọn phiên: ", 1, len(matches)) - 1]
+    folder = sel['folder']
+    print(f"   -> Phiên: {sel['name']}  (scenario={sel['cfg'].get('scenario', '?')})")
+
+    repeat_count = int(sel['cfg'].get('repeat_count', 10)) or 10
+    repeat = _ask_int(f"8. Chọn lần lặp  (01–{repeat_count:02d}): ", 1, repeat_count)
+
+    print(" Danh mục hành động (01–09):")
+    half = (len(ACTION_CATALOG) + 1) // 2
+    for i in range(half):
+        left = f"   {i + 1:02d}. {ACTION_CATALOG[i][0]:<14}"
+        right = f"{i + half + 1:02d}. {ACTION_CATALOG[i + half][0]}" if i + half < len(ACTION_CATALOG) else ""
+        print(left + right)
+    a_idx = _ask_int("9. Chọn hành động (01–09): ", 1, len(ACTION_CATALOG))
+    action_label, action_name = ACTION_CATALOG[a_idx - 1]
+
+    rx_list = _ask_int_list("10. Chọn RX (01–03, nhiều thì cách bởi dấu phẩy): ", 1, 3)
+
+    n_ant = DEVICE_ANTENNAS[dev_type]
+    if n_ant > 1:
+        ant = _ask_int(f"11. Chọn antenna (01–{n_ant:02d}): ", 1, n_ant)
+    else:
+        ant = 1
+        print(f"11. Antenna: thiết bị {dev_type} chỉ 1 antenna → tự chọn 01.")
+    with_proc = _ask_yesno("12. Tiền xử lý biên độ? (y/n) [pha luôn thô]: ")
+
+    rx_label = ", ".join(f"{r:02d}" for r in rx_list)
+    print("\n" + "-" * 62)
+    print(f" Vẽ: {action_label} ({action_name}) | {dev_type} | Rx {rx_label} | Ant {ant:02d} | Rep {repeat:02d}")
+    print(f" Tiền xử lý biên độ: {'BẬT (Hampel + LPF)' if with_proc else 'TẮT (raw)'}")
+    print("-" * 62)
+
+    chans = _load_action_csi(folder, dev_type, rx_list, ant, action_name, repeat, with_proc)
+    if not chans:
+        print("[Lỗi] Không nạp được dữ liệu (kiểm tra action_name trong action_events.csv "
+              f"có khớp map '{action_name}' không).")
+        return
+
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plot_output')
+    os.makedirs(out_dir, exist_ok=True)
+    rx_tag = "-".join(f"{r:02d}" for r in rx_list)
+    base = f"{dev_type}_{action_label}_rep{repeat:02d}_rx{rx_tag}_ant{ant:02d}"
+    meta = dict(action_label=action_label, dev=dev_type, room=room, setup=setup,
+                session=session, user=user, pos=pos, rx_label=rx_label, ant=ant, repeat=repeat)
+
+    _plot_amp_1d(chans, meta, os.path.join(out_dir, f"{base}_amp_1d.png"), with_proc)
+    print(f"  ✓ {base}_amp_1d.png")
+    _plot_amp_heatmap(chans, meta, os.path.join(out_dir, f"{base}_amp_heatmap.png"), with_proc)
+    print(f"  ✓ {base}_amp_heatmap.png")
+    _plot_phase_1d(chans, meta, os.path.join(out_dir, f"{base}_phase_1d.png"))
+    print(f"  ✓ {base}_phase_1d.png")
+    _plot_phase_heatmap(chans, meta, os.path.join(out_dir, f"{base}_phase_heatmap.png"))
+    print(f"  ✓ {base}_phase_heatmap.png")
+    print(f"\n[Thành công] 4 đồ thị đã lưu vào {out_dir}")
 
 
 def main():
 
     # 1. nhập chức năng
     while True:
-        func = input("1. Chọn chức năng (exfile / exarray): ").strip().lower()
-        if func in ['exfile', 'exarray']:
+        func = input("1. Chọn chức năng (exfile / exarray / plot): ").strip().lower()
+        if func in ['exfile', 'exarray', 'plot']:
             break
         else:
-            print("   -> Lựa chọn không hợp lệ, vui lòng gõ 'exfile' hoặc 'exarray'.")
+            print("   -> Lựa chọn không hợp lệ, gõ 'exfile' / 'exarray' / 'plot'.")
 
-   
+
     while True:
         dev_type = input("2. Chọn loại thiết bị (esp / asus): ").strip().lower()
-        
+
         # cho phép cả 'esp' và 'asus' thoát khỏi vòng lặp để chạy tiếp
         if dev_type in ['esp', 'asus']:
             break
         else:
             print("   -> Thiết bị không hợp lệ, vui lòng gõ 'esp' hoặc 'asus'.")
-    
+
     pkt_size = DEVICE_CONFIG[dev_type]['packet_size']
+
+    # ── Chức năng 3: PLOT (gộp, chọn theo chỉ số, vẽ kiểu plot_tool) ──
+    if func == 'plot':
+        run_plot_mode(dev_type)
+        input("\nNhấn Enter để thoát...")
+        return
     # 3. nhập đường dẫn
     path = input("3. Nhập đường dẫn thư mục database: ").strip().strip('"\'')
 
