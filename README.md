@@ -89,7 +89,7 @@ Headline result is the **final-epoch** metric (`last_model.pt`), not best-by-tes
 
 | Model | Protocol | Data | Test acc (final) | F1-macro | Params | Size | Latency (T4) |
 |---|---|---|---|---|---|---|---|
-| WavDualMamba (LL/HL/LH, ECA+pool_ctx) | 03 | processed | **92.98%** | 92.89% | 0.588 M | 2.44 MB | 13.26 ms |
+| WavDualMamba (LL/HL/LH, pool_ctx, no ECA) | 03 | processed | **92.83%** | 92.71% | 0.588 M | 2.44 MB | 13.11 ms |
 
 Single seed (42). Multi-seed runs are recommended before reporting in a paper.
 
