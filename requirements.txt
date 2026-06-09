@@ -1,0 +1,24 @@
+# Core — training, evaluation, preprocessing, plotting
+torch>=2.0
+numpy>=1.24
+scipy>=1.10
+PyWavelets>=1.4          # import pywt — DWT subband decomposition
+scikit-learn>=1.3        # metrics: accuracy / F1 / confusion matrix
+matplotlib>=3.7          # reporting + plot scripts
+tqdm>=4.65
+pandas>=1.5
+
+# Data parsing (00_parse_csi.py: reads vendor .dat via csiread, .mat via scipy.io)
+csiread>=1.4
+
+# csi_cut_tool (tools/csi_cut_tool) — Excel event log I/O
+openpyxl>=3.1
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Mamba SSM layers (wavmamba / wavdualmamba / wavdualmamba_v2 / tf_mamba).
+# Need a CUDA GPU + special install order (see README "Cài đặt"); NOT plain pip:
+#   pip install ninja packaging wheel triton
+#   pip install "causal-conv1d>=1.2.0" --no-build-isolation
+#   pip install mamba-ssm           --no-build-isolation
+# mamba-ssm>=2.0
+# causal-conv1d>=1.2.0

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xrf55-bench"
+version = "0.1.0"
+description = "Benchmark of CSI-based human activity recognition models on XRF55 (ResNet18-1D, TF-Mamba, WavMamba, WavDualMamba)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "imhoangt (Hoang Thi)", email = "hoangthi.contact@gmail.com" }]
+
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "PyWavelets>=1.4",
+    "scikit-learn>=1.3",
+    "matplotlib>=3.7",
+    "tqdm>=4.65",
+    "pandas>=1.5",
+    "csiread>=1.4",
+]
+
+[project.optional-dependencies]
+# Mamba SSM kernels — require CUDA GPU + special install (see README).
+mamba = ["mamba-ssm>=2.0", "causal-conv1d>=1.2.0"]
+# Extra deps used only by tools/csi_cut_tool.
+tools = ["openpyxl>=3.1"]
+
+[tool.setuptools.packages.find]
+include = ["xrf55_bench*"]
+exclude = ["legacy*", "tools*", "dataset*", "outputs*", "assets*", "docs*"]

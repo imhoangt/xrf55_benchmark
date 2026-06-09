@@ -14,7 +14,7 @@ Generates 6 plots:
   plot5_raw_vs_raw_dwt_db4.png              top: raw  /  bottom: 4 DWT-db4  subbands
   plot6_proc_vs_proc_dwt_db4.png            top: proc /  bottom: 4 DWT-db4  subbands
 
-Output: xrf55_bench/outputs/local_plots/
+Output: assets/figures/  (tracked — these are the figures used in the paper)
 
 Usage:
     cd har_csi
@@ -42,7 +42,7 @@ from xrf55_bench.preprocessing.parser    import ACTION_NAMES, ACTION_ID_TO_LABEL
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 _NPY_DIR_DEFAULT = PROJECT_ROOT / 'dataset' / 'XRF55' / 'raw_npy_nosc'
-PLOTS_DIR        = _BENCH_ROOT  / 'outputs' / 'local_plots'
+PLOTS_DIR        = PROJECT_ROOT / 'assets' / 'figures'
 
 VOL_ID         = 1
 ACTION_ID      = 35    # Running

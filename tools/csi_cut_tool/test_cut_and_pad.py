@@ -1,13 +1,13 @@
 """Test tái hiện lỗi cut_and_pad_1000 (gói lùi/trùng → output toàn 0) và xác minh bản vá.
 
-Chạy:  python csi_cut_tool/test_cut_and_pad.py
+Chạy (từ thư mục gốc repo):  python -m tools.csi_cut_tool.test_cut_and_pad
 Không cần pytest. In PASS/FAIL cho từng kiểm tra.
 """
 import os
 import struct
 import tempfile
 
-import tool.csi_cut_tool.csi_tool as csi_tool
+import tools.csi_cut_tool.csi_tool as csi_tool
 
 PSIZE = 144  # esp packet size
 
