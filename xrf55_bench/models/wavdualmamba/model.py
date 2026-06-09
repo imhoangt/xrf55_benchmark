@@ -39,13 +39,13 @@ Per-branch (one per SELECTED subband s):
       → TFBlock×2      dilation [1,2] → RF 7→19 timesteps (drop_path 0.0,0.05)
       → [FreqMix]      optional nonlinear subcarrier mix (freq_mix='mlp')
       → flatten F×C    (B, d_stem, T2, F2) → (B, T2, d_stem*F2)   ← KEEP frequency
-      → Linear embed   d_stem*F2 → d_model + Dropout(0.1) [+ optional PosEmb]
+      → Linear embed   d_stem*F2 → d_model + SiLU + Dropout(0.1) [+ optional PosEmb]
       → BiMamba ×L      fwd/bwd merged by a per-channel ZERO-INIT gate
                         (starts at ½(fwd+bwd), specialises if data supports it)
     ⇒ S_s (B, T2, d_model)
 
 Fusion + head:
-    AdaptiveFusion(S_s …)   N-way softmax gating (zero-init → uniform at step 0)
+    AdaptiveFusion(S_s …)   convex | gate | concat merge (zero-init → mean at step 0)
       → AttnStatPool        ECAPA mean‖std over time → (B, 2*d_model)
       → Classifier          LN → Dropout → Linear → logits (B, num_classes)
 
@@ -54,6 +54,9 @@ Ablation flags:
                      {HL,LH} {LL,HL} {LL,LH} {LL,HL,LH}.
     share_branches — tie the TFBlock+embed+BiMamba across subbands (stems stay
                      per-subband). Default False (separate, more expressive).
+    fusion         — 'convex' | 'gate' | 'concat' branch-merge (default 'convex'
+                     = baseline). 'gate' = per-channel convex routing; 'concat'
+                     = static full-matrix mix. See AdaptiveFusion.
     use_pos_emb    — sinusoidal absolute PE (default False; Mamba encodes order
                      via its recurrence, so PE is usually redundant here).
     bidirectional  — backward Mamba branch + gate (default True).
@@ -419,36 +422,82 @@ class BranchBackbone(nn.Module):
         return self.mamba(x)                             # (B, T2, d_model)
 
 
-# ─── Adaptive N-way fusion (zero-init → uniform at step 0) ─────────────────────
+# ─── Adaptive N-way fusion (zero-init → mean of streams at step 0) ─────────────
 
 class AdaptiveFusion(nn.Module):
-    """Soft-weighted fusion of N streams (generalises TF-Mamba's 2-way fusion).
+    """Merge N branch streams → (B, T, d). Three modes, all zero-initialised so
+    the block starts as the plain mean of the streams (uniform 1/N weighting) at
+    step 0 — every variant departs from the SAME function, so an ablation
+    measures what is *learned*, not init luck.
 
-        S_cat = concat(S_1 … S_N)                 (B, T, N·d)
-        α     = softmax(Linear_{N·d→N}(S_cat))    (B, T, N)   per-token weights
-        out   = Σ_i α_i ⊙ S_i                      (B, T, d)
+        cat = concat(S_1 … S_N)                       (B, T, N·d)
 
-    The Linear is zero-initialised, so α is uniform (1/N) at step 0.
+      'convex' (default = baseline, TF-Mamba style):
+        α   = softmax(Linear_{N·d→N}(cat))            (B, T, N)   one scalar weight
+        out = Σ_i α_i ⊙ S_i                            per BRANCH per token → all d
+              channels of a branch share one weight (the bottleneck 'gate' lifts).
+
+      'gate' (per-channel convex routing):
+        a   = Linear_{N·d→N·d}(cat) → (B, T, N, d)
+        α   = softmax(a, dim=branch)                  per token, per CHANNEL
+        out = Σ_i α_i ⊙ S_i                            each channel mixes the N
+              branches independently (take channel j from one, k from another).
+              Still input-adaptive and convex (α ≥ 0, Σ_i α_i = 1).
+
+      'concat' (static full-matrix mix):
+        out = Linear_{N·d→d}(cat)                      one learned matrix; can add,
+              subtract and cross-mix channels, but is the SAME at every timestep
+              (not input-adaptive). Init = averaging (each d×d block = I/N).
+
+    'convex' keeps the original `self.linear` parameter name so baseline
+    checkpoints load unchanged; 'gate'/'concat' use `self.proj`.
     """
 
-    def __init__(self, d_model: int, n_branches: int):
+    def __init__(self, d_model: int, n_branches: int, mode: str = 'convex'):
         super().__init__()
+        if mode not in ('convex', 'gate', 'concat'):
+            raise ValueError(
+                f"fusion mode must be 'convex'|'gate'|'concat', got {mode!r}"
+            )
         self.n_branches = n_branches
-        if n_branches > 1:
+        self.d_model    = d_model
+        self.mode       = mode
+        self.linear     = None          # 'convex'  (original name → ckpt-compatible)
+        self.proj       = None          # 'gate' / 'concat'
+        if n_branches == 1:
+            return                       # single branch — nothing to fuse
+        if mode == 'convex':
             self.linear = nn.Linear(n_branches * d_model, n_branches)
             nn.init.zeros_(self.linear.weight)
             nn.init.zeros_(self.linear.bias)
-        else:
-            self.linear = None
+        elif mode == 'gate':
+            self.proj = nn.Linear(n_branches * d_model, n_branches * d_model)
+            nn.init.zeros_(self.proj.weight)     # softmax → 1/N per channel ⇒ mean
+            nn.init.zeros_(self.proj.bias)
+        else:  # 'concat'
+            self.proj = nn.Linear(n_branches * d_model, d_model)
+            with torch.no_grad():                # init = averaging ⇒ mean at step 0
+                self.proj.weight.zero_()
+                self.proj.bias.zero_()
+                for i in range(n_branches):
+                    self.proj.weight[:, i * d_model:(i + 1) * d_model] = \
+                        torch.eye(d_model) / n_branches
 
     def forward(self, streams: list[torch.Tensor]) -> torch.Tensor:
-        if self.linear is None:
+        if self.n_branches == 1:
             return streams[0]
-        cat = torch.cat(streams, dim=-1)                 # (B, T, N·d)
-        w = self.linear(cat).softmax(dim=-1)             # (B, T, N)
-        out = sum(w[..., i:i + 1] * streams[i]
-                  for i in range(self.n_branches))
-        return out                                       # (B, T, d)
+        cat = torch.cat(streams, dim=-1)                     # (B, T, N·d)
+        if self.mode == 'convex':
+            w = self.linear(cat).softmax(dim=-1)             # (B, T, N)
+            return sum(w[..., i:i + 1] * streams[i]
+                       for i in range(self.n_branches))      # (B, T, d)
+        if self.mode == 'gate':
+            B, T, _ = cat.shape
+            w = self.proj(cat).view(B, T, self.n_branches, self.d_model)
+            w = w.softmax(dim=2)                             # (B, T, N, d)
+            s = torch.stack(streams, dim=2)                  # (B, T, N, d)
+            return (w * s).sum(dim=2)                        # (B, T, d)
+        return self.proj(cat)                                # 'concat' → (B, T, d)
 
 
 # ─── [C6] FinalAttention — optional MHSA after fusion, before pooling ────────────
@@ -556,6 +605,11 @@ class WavDualMamba(nn.Module):
         share_branches : tie TFBlock+embed+BiMamba across subbands; stems stay
                          per-subband (default False). When True, the branches are
                          run in ONE batched backbone call (≈ N× throughput).
+        fusion         : 'convex' | 'gate' | 'concat' — how the N branch streams
+                         are merged (all (B,T,d)→(B,T,d), zero-init → mean at
+                         step 0). 'convex' = per-branch scalar (default, baseline);
+                         'gate' = per-channel convex routing; 'concat' = static
+                         full-matrix mix. See AdaptiveFusion.
         freq_mix       : None | 'mlp' — nonlinear subcarrier mix before flatten.
         expand         : Mamba inner-expansion factor (default 2, capacity knob).
         d_conv         : Mamba local conv1d width (default 4).
@@ -601,6 +655,7 @@ class WavDualMamba(nn.Module):
         bidirectional: bool = True,
         use_pos_emb: bool = False,
         share_branches: bool = False,
+        fusion: str = 'convex',
         freq_mix: str = None,
         expand: int = 2,
         d_conv: int = 4,
@@ -665,7 +720,7 @@ class WavDualMamba(nn.Module):
             })
 
         self.eca = ECA() if use_eca else None
-        self.fusion = AdaptiveFusion(d_model, self.n_branches)
+        self.fusion = AdaptiveFusion(d_model, self.n_branches, mode=fusion)
         self.final_attn = (FinalAttention(d_model, n_heads=attn_heads,
                                           attn_drop=attn_drop, drop_path=attn_drop_path)
                            if use_final_attn else None)
