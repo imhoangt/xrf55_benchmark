@@ -6,20 +6,19 @@ from typing import Optional
 
 @dataclass
 class TrainCfg:
-    # Bare TrainCfg() mirrors protocol '01' (the plain baseline) so the protocol
-    # label always matches the fields. Use TrainCfg_for_protocol() — the canonical
-    # constructor — for '02' / '03'; it overrides every field below per preset.
-    protocol:         str            = '01'    # '01' | '02' | '03'
+    # Always use TrainCfg_for_protocol() — the canonical constructor.
+    # Bare TrainCfg() field defaults are for '01' (XRF55 paper).
+    protocol:         str            = '01'    # '01' | '02'
 
     # Hyperparameters
-    lr:               float          = 1e-4
-    batch_size:       int            = 32
-    num_epochs:       int            = 40
+    lr:               float          = 1e-3
+    batch_size:       int            = 64
+    num_epochs:       int            = 200
     grad_clip:        Optional[float]= None    # None = no clipping
-    weight_decay:     float          = 0.01
+    weight_decay:     float          = 0.0
 
     # Optimizer: 'adamw' | 'adam' | 'sgd'
-    optimizer:        str            = 'adamw'
+    optimizer:        str            = 'adam'
     betas:            tuple          = (0.9, 0.999)
     eps:              float          = 1e-8
 
@@ -36,18 +35,12 @@ class TrainCfg:
     # Data mode: 'raw' | 'proc' | None (None = auto-infer from stats.json meta)
     data_mode:        Optional[str]  = None
 
-    # Seeds — (42,) single default, (4, 8, 17, 42) multi
+    # Seeds — mode 1: (42,)  |  mode 2: (0, 4, 8, 17, 42)
     seeds:            tuple          = (42,)
 
 
 _PROTOCOL_DEFAULTS = {
-    '01': dict(                         # plain — tf_mamba paper
-        optimizer='adamw', lr=1e-4,  batch_size=32, num_epochs=40,
-        betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01,
-        scheduler=None, warmup_epochs=0,
-        grad_clip=None, criterion='ce', label_smoothing=0.0,
-    ),
-    '02': dict(                         # xrf55 paper
+    '01': dict(                         # xrf55 paper
         optimizer='adam',  lr=1e-3,  batch_size=64, num_epochs=200,
         betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0,
         scheduler='multistep',
@@ -55,7 +48,7 @@ _PROTOCOL_DEFAULTS = {
         warmup_epochs=0,
         grad_clip=None, criterion='ce', label_smoothing=0.0,
     ),
-    '03': dict(                         # apwmamba paper
+    '02': dict(                         # apwmamba paper
         optimizer='adamw', lr=5e-4,  batch_size=32, num_epochs=200,
         betas=(0.9, 0.99), eps=1e-8, weight_decay=1e-3,
         scheduler='warmup_cosine', warmup_epochs=10, floor_lr=4e-5,

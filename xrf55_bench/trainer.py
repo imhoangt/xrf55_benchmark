@@ -1,15 +1,19 @@
-"""XRF55 benchmark trainer — unified, 3-protocol, configurable.
+"""XRF55 benchmark trainer — unified, 2-protocol, configurable.
 
-Single trainer for all three benchmark models. Configure via TrainCfg or
+Single trainer for all benchmark models. Configure via TrainCfg or
 use TrainCfg_for_protocol() presets to select a training protocol.
 
 Split: train=reps 1-14 (4620), test=reps 15-20 (1980). No val.
 
 Protocols
 ---------
-  01  AdamW lr=1e-4  wd=0.01, no scheduler, 40ep  (tf_mamba paper)
-  02  Adam  lr=1e-3, MultiStepLR,   200ep  (XRF55 paper)
-  03  AdamW lr=5e-4, warmup(10ep)+cosine, 200ep  (APWMamba paper)
+  01  Adam  lr=1e-3, MultiStepLR,   200ep  (XRF55 paper)
+  02  AdamW lr=5e-4, warmup(10ep)+cosine, 200ep  (APWMamba paper)
+
+Seeds
+-----
+  mode 1  seeds=(42,)               — single seed
+  mode 2  seeds=(0, 4, 8, 17, 42)   — multi seed
 
 All protocols: no early stop, FP32.
   last_model.pt  — epoch cuối (model chính, dùng cho final eval)
@@ -146,7 +150,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
 
 # ── Factory functions ─────────────────────────────────────────────────────────
 
-# Params excluded from weight_decay in protocol 03
+# Params excluded from weight_decay in protocol 02
 _NO_DECAY_KEYS  = {'bias', 'A_log', 'D', 'pos_emb'}
 _NORM_MODULES   = (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d,
                    nn.BatchNorm3d, nn.GroupNorm)
@@ -179,7 +183,7 @@ def _build_no_decay_set(model: nn.Module) -> set:
 
 
 def _make_optimizer(model: nn.Module, cfg: TrainCfg):
-    if cfg.protocol == '03':
+    if cfg.protocol == '02':
         no_decay   = _build_no_decay_set(model)
         decay_p    = [p for n, p in model.named_parameters()
                       if p.requires_grad and n not in no_decay]
@@ -303,7 +307,7 @@ def main(model_name: str, output_dir,
          num_workers: int = 4,
          model_kwargs: dict = None):
     if cfg is None:
-        cfg = TrainCfg_for_protocol('03')
+        cfg = TrainCfg_for_protocol('02')
     if not cfg.seeds:
         raise ValueError('cfg.seeds is empty — provide at least one seed.')
     if model_name not in _MODEL_NAMES:
