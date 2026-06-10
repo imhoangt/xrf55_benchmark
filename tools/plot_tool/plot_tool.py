@@ -14,21 +14,27 @@ Người dùng chọn:
     2. Người    (01–30)   → vol_id
     3. Lần lặp  (01–20)   → rep_id
     4. RX       (01–03)   → CÓ THỂ chọn nhiều RX, cách nhau bởi dấu phẩy (vd: 01, 02, 03).
-                            Nhiều RX → mỗi đồ thị xếp DỌC, mỗi RX một hàng.
-    5. Antenna  (01–03)   → antenna trong mỗi RX (dùng chung cho mọi RX đã chọn).
-    6. Tiền xử lý biên độ? (y/n) — bật/tắt overlay Hampel + Butterworth LPF.
+                            Nhiều RX → mỗi đồ thị xếp NGANG, mỗi RX một cột.
+    5. Antenna  (01–03)   → CÓ THỂ chọn nhiều antenna, cách nhau bởi dấu phẩy (vd: 01, 02, 03).
+                            Nhiều antenna → xếp DỌC, mỗi antenna một hàng.
+                            Layout tổng quát: rows = antenna, columns = RX.
+    6. Subcarrier (01–30)  → subcarrier hiển thị trong đồ thị 1D (heatmap luôn hiện đủ 30).
+    7. Vẽ đồ thị pha? (y/n) — bật/tắt 2 file pha (phase_1d + phase_heatmap).
        Pha LUÔN ở dạng thô (không tiền xử lý).
+    8. Tiền xử lý biên độ? (y/n) — bật/tắt overlay Hampel + Butterworth LPF.
 
-Xuất 4 file PNG vào tool/plot_tool/outputs/ (subcarrier 10/30 cho đồ thị 1D):
-    {base}_amp_1d.png        biên độ 1D — raw (tắt) / raw+proc (bật)
-    {base}_amp_heatmap.png   biên độ heatmap 30 subcarrier — raw (tắt) / raw|proc (bật)
-    {base}_phase_1d.png      pha thô 1D
-    {base}_phase_heatmap.png pha thô heatmap 30 subcarrier
-trong đó base = "{vol:02d}_{action_id:02d}_{rep:02d}_rx{rx-list}_ant{ant:02d}".
+Xuất 2–4 file PNG vào tools/plot_tool/outputs/:
+    {base}_amp_1d.png        biên độ 1D tại subcarrier đã chọn — raw / raw+proc  [luôn xuất]
+    {base}_amp_heatmap.png   biên độ heatmap 30 subcarrier — raw / raw|proc       [luôn xuất]
+    {base}_phase_1d.png      pha thô 1D tại subcarrier đã chọn                    [nếu chọn pha]
+    {base}_phase_heatmap.png pha thô heatmap 30 subcarrier                         [nếu chọn pha]
+trong đó base = "{vol:02d}_{action_id:02d}_{rep:02d}_rx{rx-list}_ant{ant-list}_sc{sc:02d}".
+
+Amp heatmap với tiền xử lý: mỗi RX chiếm 2 cột liền nhau (raw | proc).
 
 Usage:
     cd har_csi
-    python tool/plot_tool/plot_tool.py
+    python tools/plot_tool/plot_tool.py
 """
 import re
 import sys
@@ -41,7 +47,7 @@ try:
 except (AttributeError, ValueError):
     pass
 
-# tool/plot_tool/plot_tool.py → har_csi/ (đi lên 2 cấp) để import được xrf55_bench.
+# tools/plot_tool/plot_tool.py → har_csi/ (đi lên 3 cấp) để import được xrf55_bench.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -61,16 +67,21 @@ from xrf55_bench.preprocessing.amplitude import hampel_vectorized
 SCENE_DIR_DEFAULT = PROJECT_ROOT / 'dataset' / 'XRF55' / 'raw' / 'scene_01'
 OUT_DIR_DEFAULT   = Path(__file__).resolve().parent / 'outputs'
 
-VIZ_SUBCARRIER = 9        # 0-indexed → "Subcarrier 10/30" cho đồ thị 1D
 _DUR_S = 5.0              # 1000 frame @ 200 Hz → 0–5 s
 _N_SC  = 30
 _FS    = 200.0
 
-# Kích thước figure đồng nhất: mỗi HÀNG (1 RX) cao 4; ảnh 1-panel rộng 12,
-# ảnh 2-panel (raw|proc) rộng 16. Nhiều RX → chiều cao nhân theo số RX.
-_FIG_W_1P = 12
-_FIG_W_2P = 16
-_FIG_H_ROW = 4
+# Kích thước figure: mỗi cột (1 RX) rộng _FIG_W_1P; mỗi hàng (1 antenna) cao _FIG_H_ROW.
+# Amp heatmap với proc: mỗi RX chiếm 2 cột (raw|proc) → độ rộng nhân _FIG_W_2P mỗi RX.
+_FIG_W_1P  = 12   # rộng mỗi RX-column cho đồ thị 1-panel (1D, phase, heatmap raw-only)
+_FIG_W_2P  = 16   # rộng mỗi RX-column cho amp heatmap với proc (2 panels: raw + proc)
+_FIG_H_ROW = 4    # cao mỗi antenna-row
+
+# Font sizes — đồng nhất cho mọi đồ thị.
+_FS_SUPTITLE = 13   # tiêu đề tổng (fig.suptitle)
+_FS_TITLE    = 11   # tiêu đề mỗi ô (ax.set_title)
+_FS_LEGEND   = 9    # chú thích (ax.legend)
+_FS_LABEL    = 9    # nhãn trục (xlabel, ylabel)
 
 # Butterworth bậc 4, cutoff 20 Hz — y hệt 03_plot_amplitude.py.
 _SOS = butter(4, 20.0, btype='low', fs=_FS, output='sos')
@@ -102,9 +113,9 @@ def _process_amp(raw_amp: np.ndarray) -> np.ndarray:
     return x[0]                                                # (1000, 30)
 
 
-def _suptitle(action_name: str, vol: int, rx_label: str, ant: int, rep: int,
+def _suptitle(action_name: str, vol: int, rx_label: str, ant_label: str, rep: int,
               subcarrier: int = None, all_sc: bool = False) -> str:
-    parts = [action_name, f"Subject {vol:02d}", f"Rx {rx_label}", f"Ant {ant:02d}"]
+    parts = [action_name, f"Subject {vol:02d}", f"Rx {rx_label}", f"Ant {ant_label}"]
     if all_sc:
         parts.append("All 30 Subcarriers")
     elif subcarrier is not None:
@@ -113,100 +124,122 @@ def _suptitle(action_name: str, vol: int, rx_label: str, ant: int, rep: int,
     return "  |  ".join(parts)
 
 
-def _row_title(base_title: str, rx: int, n_rx: int) -> str:
-    """Tiền tố 'Rx 0X — ' cho từng hàng khi vẽ nhiều RX (1 RX thì giữ nguyên)."""
-    return f"Rx {rx:02d} — {base_title}" if n_rx > 1 else base_title
+# ── Đồ thị (rows = antenna, cols = RX) ─────────────────────────────────────────────
 
+def plot_amp_1d(chans_grid, info, out_path, with_proc: bool, sc: int):
+    """Biên độ 1D tại subcarrier `sc` (0-indexed). with_proc=False → raw; True → raw+proc.
 
-# ── Đồ thị (mỗi RX = 1 hàng, xếp dọc) ─────────────────────────────────────────────
-
-def plot_amp_1d(chans, info, out_path, with_proc: bool):
-    """Biên độ 1D, 1 subcarrier. with_proc=False → chỉ raw; True → raw+proc."""
-    sc, n = VIZ_SUBCARRIER, len(chans)
-    t = np.linspace(0, _DUR_S, chans[0]['raw_amp'].shape[0], endpoint=False)
-    base_title = ('CSI Amplitude raw and after preprocessing' if with_proc
-                  else 'Raw CSI Amplitude')
-    fig, axes = plt.subplots(n, 1, figsize=(_FIG_W_1P, _FIG_H_ROW * n),
+    chans_grid[i_ant][i_rx] = dict(rx, ant, raw_amp, proc_amp, raw_ph).
+    """
+    n_ant = len(chans_grid)
+    n_rx  = len(chans_grid[0])
+    t  = np.linspace(0, _DUR_S, chans_grid[0][0]['raw_amp'].shape[0], endpoint=False)
+    fig, axes = plt.subplots(n_ant, n_rx,
+                             figsize=(_FIG_W_1P * n_rx, _FIG_H_ROW * n_ant),
                              squeeze=False, sharex=True)
-    for i, ch in enumerate(chans):
-        ax = axes[i, 0]
-        ax.plot(t, ch['raw_amp'][:, sc], color='steelblue', lw=0.8, alpha=0.8,
-                label='Raw CSI Amplitude')
-        if with_proc:
-            ax.plot(t, ch['proc_amp'][:, sc], color='darkorange', lw=1.2,
-                    label='After Hampel + Butterworth LPF')
-        ax.set_ylabel('Amplitude')
-        ax.set_title(_row_title(base_title, ch['rx'], n))
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-    axes[-1, 0].set_xlabel('Time (s)')
-    fig.suptitle(_suptitle(**info, subcarrier=sc), fontsize=10)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-
-
-def plot_amp_heatmap(chans, info, out_path, with_proc: bool):
-    """Biên độ heatmap 30 subcarrier. n hàng (RX) × (1 cột raw | 2 cột raw,proc)."""
-    n = len(chans)
-    ncol = 2 if with_proc else 1
-    width = _FIG_W_2P if with_proc else _FIG_W_1P
-    fig, axes = plt.subplots(n, ncol, figsize=(width, _FIG_H_ROW * n), squeeze=False)
-    for i, ch in enumerate(chans):
-        cells = [(ch['raw_amp'], 'Raw CSI Amplitude')]
-        if with_proc:
-            cells.append((ch['proc_amp'], 'CSI Amplitude after Hampel + Butterworth LPF'))
-        for j, (data, title) in enumerate(cells):
+    for i, row in enumerate(chans_grid):
+        for j, ch in enumerate(row):
             ax = axes[i, j]
-            vmin, vmax = np.percentile(data, [1, 99])
-            im = ax.imshow(data.T, aspect='auto', origin='lower', cmap='viridis',
-                           vmin=vmin, vmax=vmax, extent=[0, _DUR_S, 0, _N_SC - 1])
-            ax.set_title(_row_title(title, ch['rx'], n))
-            ax.set_xlabel('Time (s)')
-            ax.set_ylabel('Subcarrier')
-            plt.colorbar(im, ax=ax, fraction=0.046)
-    fig.suptitle(_suptitle(**info, all_sc=True), fontsize=10)
+            ax.plot(t, ch['raw_amp'][:, sc], color='steelblue', lw=0.8, alpha=0.8,
+                    label='Raw CSI Amplitude')
+            if with_proc:
+                ax.plot(t, ch['proc_amp'][:, sc], color='darkorange', lw=1.2,
+                        label='After Hampel + Butterworth LPF')
+            ax.set_title(f"Rx {ch['rx']:02d} / Ant {ch['ant']:02d}", fontsize=_FS_TITLE)
+            ax.legend(loc='upper right', fontsize=_FS_LEGEND)
+            ax.grid(True, alpha=0.3)
+            if j == 0:
+                ax.set_ylabel('Amplitude', fontsize=_FS_LABEL)
+            if i == n_ant - 1:
+                ax.set_xlabel('Time (s)', fontsize=_FS_LABEL)
+    fig.suptitle(_suptitle(**info, subcarrier=sc), fontsize=_FS_SUPTITLE)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
-def plot_phase_1d(chans, info, out_path):
-    """Pha thô 1D, 1 subcarrier."""
-    sc, n = VIZ_SUBCARRIER, len(chans)
-    t = np.linspace(0, _DUR_S, chans[0]['raw_ph'].shape[0], endpoint=False)
-    fig, axes = plt.subplots(n, 1, figsize=(_FIG_W_1P, _FIG_H_ROW * n),
+def plot_amp_heatmap(chans_grid, info, out_path, with_proc: bool):
+    """Biên độ heatmap 30 subcarrier.
+
+    Layout: rows = antenna, cols = RX × (1 nếu raw-only | 2 nếu raw+proc).
+    Khi with_proc=True, cột j*2 = raw, cột j*2+1 = proc cho RX thứ j.
+    """
+    n_ant = len(chans_grid)
+    n_rx  = len(chans_grid[0])
+    ncol_per_rx = 2 if with_proc else 1
+    total_cols  = n_rx * ncol_per_rx
+    fig_w = _FIG_W_2P * n_rx if with_proc else _FIG_W_1P * n_rx
+    fig, axes = plt.subplots(n_ant, total_cols,
+                             figsize=(fig_w, _FIG_H_ROW * n_ant),
+                             squeeze=False)
+    for i, row in enumerate(chans_grid):
+        for j, ch in enumerate(row):
+            cells = [(ch['raw_amp'], f"Rx {ch['rx']:02d} / Ant {ch['ant']:02d} — Raw")]
+            if with_proc:
+                cells.append((ch['proc_amp'],
+                               f"Rx {ch['rx']:02d} / Ant {ch['ant']:02d} — Hampel+LPF"))
+            for k, (data, title) in enumerate(cells):
+                ax = axes[i, j * ncol_per_rx + k]
+                vmin, vmax = np.percentile(data, [1, 99])
+                im = ax.imshow(data.T, aspect='auto', origin='lower', cmap='viridis',
+                               vmin=vmin, vmax=vmax,
+                               extent=[0, _DUR_S, 0, _N_SC - 1])
+                ax.set_title(title, fontsize=_FS_TITLE)
+                ax.set_xlabel('Time (s)', fontsize=_FS_LABEL)
+                ax.set_ylabel('Subcarrier', fontsize=_FS_LABEL)
+                plt.colorbar(im, ax=ax, fraction=0.046)
+    fig.suptitle(_suptitle(**info, all_sc=True), fontsize=_FS_SUPTITLE)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_phase_1d(chans_grid, info, out_path, sc: int):
+    """Pha thô 1D tại subcarrier `sc` (0-indexed). rows = antenna, cols = RX."""
+    n_ant = len(chans_grid)
+    n_rx  = len(chans_grid[0])
+    t  = np.linspace(0, _DUR_S, chans_grid[0][0]['raw_ph'].shape[0], endpoint=False)
+    fig, axes = plt.subplots(n_ant, n_rx,
+                             figsize=(_FIG_W_1P * n_rx, _FIG_H_ROW * n_ant),
                              squeeze=False, sharex=True)
-    for i, ch in enumerate(chans):
-        ax = axes[i, 0]
-        ax.plot(t, ch['raw_ph'][:, sc], color='steelblue', lw=0.8, alpha=0.8,
-                label='Raw CSI Phase')
-        ax.set_ylabel('Phase (rad)')
-        ax.set_title(_row_title('Raw CSI Phase', ch['rx'], n))
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-    axes[-1, 0].set_xlabel('Time (s)')
-    fig.suptitle(_suptitle(**info, subcarrier=sc), fontsize=10)
+    for i, row in enumerate(chans_grid):
+        for j, ch in enumerate(row):
+            ax = axes[i, j]
+            ax.plot(t, ch['raw_ph'][:, sc], color='steelblue', lw=0.8, alpha=0.8,
+                    label='Raw CSI Phase')
+            ax.set_title(f"Rx {ch['rx']:02d} / Ant {ch['ant']:02d}", fontsize=_FS_TITLE)
+            ax.legend(loc='upper right', fontsize=_FS_LEGEND)
+            ax.grid(True, alpha=0.3)
+            if j == 0:
+                ax.set_ylabel('Phase (rad)', fontsize=_FS_LABEL)
+            if i == n_ant - 1:
+                ax.set_xlabel('Time (s)', fontsize=_FS_LABEL)
+    fig.suptitle(_suptitle(**info, subcarrier=sc), fontsize=_FS_SUPTITLE)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
-def plot_phase_heatmap(chans, info, out_path):
-    """Pha thô heatmap 30 subcarrier."""
-    n = len(chans)
-    fig, axes = plt.subplots(n, 1, figsize=(_FIG_W_1P, _FIG_H_ROW * n), squeeze=False)
-    for i, ch in enumerate(chans):
-        ax = axes[i, 0]
-        data = ch['raw_ph']
-        vmax = float(np.percentile(np.abs(data), 99))
-        im = ax.imshow(data.T, aspect='auto', origin='lower', cmap='RdBu_r',
-                       vmin=-vmax, vmax=vmax, extent=[0, _DUR_S, 0, _N_SC - 1])
-        ax.set_title(_row_title('Raw CSI Phase', ch['rx'], n))
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Subcarrier')
-        plt.colorbar(im, ax=ax, fraction=0.046)
-    fig.suptitle(_suptitle(**info, all_sc=True), fontsize=10)
+def plot_phase_heatmap(chans_grid, info, out_path):
+    """Pha thô heatmap 30 subcarrier. rows = antenna, cols = RX."""
+    n_ant = len(chans_grid)
+    n_rx  = len(chans_grid[0])
+    fig, axes = plt.subplots(n_ant, n_rx,
+                             figsize=(_FIG_W_1P * n_rx, _FIG_H_ROW * n_ant),
+                             squeeze=False)
+    for i, row in enumerate(chans_grid):
+        for j, ch in enumerate(row):
+            ax = axes[i, j]
+            data = ch['raw_ph']
+            vmax = float(np.percentile(np.abs(data), 99))
+            im = ax.imshow(data.T, aspect='auto', origin='lower', cmap='RdBu_r',
+                           vmin=-vmax, vmax=vmax,
+                           extent=[0, _DUR_S, 0, _N_SC - 1])
+            ax.set_title(f"Rx {ch['rx']:02d} / Ant {ch['ant']:02d}", fontsize=_FS_TITLE)
+            ax.set_xlabel('Time (s)', fontsize=_FS_LABEL)
+            ax.set_ylabel('Subcarrier', fontsize=_FS_LABEL)
+            plt.colorbar(im, ax=ax, fraction=0.046)
+    fig.suptitle(_suptitle(**info, all_sc=True), fontsize=_FS_SUPTITLE)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
@@ -266,18 +299,28 @@ def main():
     action_choice = _ask_int("1. Chọn hành động (01–11): ", 1, 11)
     vol           = _ask_int("2. Chọn người    (01–30): ", 1, 30)
     rep           = _ask_int("3. Chọn lần lặp  (01–20): ", 1, 20)
-    rx_list       = _ask_int_list("4. Chọn RX (01–03, nhiều RX cách bởi dấu phẩy, vd 01, 02, 03): ", 1, 3)
-    ant           = _ask_int("5. Chọn antenna  (01–03): ", 1, 3)
-    with_proc     = _ask_yesno("6. Tiền xử lý biên độ? (y/n) [pha luôn thô]: ")
+    rx_list       = _ask_int_list(
+        "4. Chọn RX      (01–03, nhiều RX cách bởi dấu phẩy, vd 1 2 3): ", 1, 3)
+    ant_list      = _ask_int_list(
+        "5. Chọn antenna (01–03, nhiều ant cách bởi dấu phẩy, vd 1 2 3): ", 1, 3)
+    sc_user       = _ask_int("6. Chọn subcarrier 1D   (01–30): ", 1, 30)
+    sc            = sc_user - 1                    # 0-indexed dùng nội bộ
+    plot_phase    = _ask_yesno("7. Vẽ đồ thị pha?       (y/n): ")
+    with_proc     = _ask_yesno("8. Tiền xử lý biên độ?  (y/n) [pha luôn thô]: ")
 
     label       = action_choice - 1
     action_id   = _LABEL_TO_ACTION_ID[label]
     action_name = ACTION_NAMES[label]
     rx_label    = ", ".join(f"{r:02d}" for r in rx_list)
+    ant_label   = ", ".join(f"{a:02d}" for a in ant_list)
 
     print("\n" + "-" * 62)
-    print(f" Mẫu: {action_name} | Subject {vol:02d} | Rx {rx_label} | Ant {ant:02d}"
-          f" | Rep {rep:02d} | action_id={action_id}")
+    print(f" Mẫu: {action_name} | Subject {vol:02d} | Rx {rx_label}"
+          f" | Ant {ant_label} | Rep {rep:02d} | action_id={action_id}")
+    print(f" Layout: {len(ant_list)} hàng (antenna) × {len(rx_list)} cột (RX)"
+          f" = {len(ant_list) * len(rx_list)} ô")
+    print(f" Subcarrier 1D:      {sc_user:02d}/30")
+    print(f" Vẽ pha:             {'CÓ' if plot_phase else 'KHÔNG'}")
     print(f" Tiền xử lý biên độ: {'BẬT (Hampel + LPF)' if with_proc else 'TẮT (raw)'}")
     print("-" * 62)
 
@@ -293,38 +336,51 @@ def main():
         input("Nhấn Enter để thoát...")
         return
 
-    # Một channel (raw_amp, proc_amp, raw_ph) cho mỗi RX đã chọn (cùng antenna).
-    chans = []
-    for rx in rx_list:
-        raw_amp, raw_ph = _channel(csi, rx, ant)
-        chans.append(dict(
-            rx=rx,
-            raw_amp=raw_amp,
-            proc_amp=_process_amp(raw_amp) if with_proc else None,
-            raw_ph=raw_ph,
-        ))
-    print(f"[Nạp xong] {len(chans)} RX × (1000, 30)  |  Ant {ant:02d}")
+    # chans_grid[i_ant][i_rx]: outer loop = antenna (rows), inner loop = RX (cols).
+    chans_grid = []
+    for ant in ant_list:
+        row = []
+        for rx in rx_list:
+            raw_amp, raw_ph = _channel(csi, rx, ant)
+            row.append(dict(
+                rx=rx,
+                ant=ant,
+                raw_amp=raw_amp,
+                proc_amp=_process_amp(raw_amp) if with_proc else None,
+                raw_ph=raw_ph if plot_phase else None,
+            ))
+        chans_grid.append(row)
+    print(f"[Nạp xong] {len(ant_list)} ant × {len(rx_list)} RX"
+          f" = {len(ant_list) * len(rx_list)} kênh | (1000, 30) mỗi kênh")
 
     OUT_DIR_DEFAULT.mkdir(parents=True, exist_ok=True)
-    rx_tag = "-".join(f"{r:02d}" for r in rx_list)
-    base   = f"{vol:02d}_{action_id:02d}_{rep:02d}_rx{rx_tag}_ant{ant:02d}"
-    info   = dict(action_name=action_name, vol=vol, rx_label=rx_label, ant=ant, rep=rep)
+    rx_tag  = "-".join(f"{r:02d}" for r in rx_list)
+    ant_tag = "-".join(f"{a:02d}" for a in ant_list)
+    base    = f"{vol:02d}_{action_id:02d}_{rep:02d}_rx{rx_tag}_ant{ant_tag}_sc{sc_user:02d}"
+    info    = dict(action_name=action_name, vol=vol, rx_label=rx_label,
+                   ant_label=ant_label, rep=rep)
 
     p_amp_1d = OUT_DIR_DEFAULT / f"{base}_amp_1d.png"
     p_amp_hm = OUT_DIR_DEFAULT / f"{base}_amp_heatmap.png"
     p_ph_1d  = OUT_DIR_DEFAULT / f"{base}_phase_1d.png"
     p_ph_hm  = OUT_DIR_DEFAULT / f"{base}_phase_heatmap.png"
 
-    plot_amp_1d(chans, info, p_amp_1d, with_proc)
-    print(f"  ✓ {p_amp_1d.name}   (biên độ 1D, {'raw+proc' if with_proc else 'raw'})")
-    plot_amp_heatmap(chans, info, p_amp_hm, with_proc)
+    n_saved = 0
+    plot_amp_1d(chans_grid, info, p_amp_1d, with_proc, sc)
+    print(f"  ✓ {p_amp_1d.name}   (biên độ 1D sc{sc_user:02d}, {'raw+proc' if with_proc else 'raw'})")
+    n_saved += 1
+    plot_amp_heatmap(chans_grid, info, p_amp_hm, with_proc)
     print(f"  ✓ {p_amp_hm.name}   (biên độ heatmap, {'raw|proc' if with_proc else 'raw'})")
-    plot_phase_1d(chans, info, p_ph_1d)
-    print(f"  ✓ {p_ph_1d.name}   (pha thô 1D)")
-    plot_phase_heatmap(chans, info, p_ph_hm)
-    print(f"  ✓ {p_ph_hm.name}   (pha thô heatmap)")
+    n_saved += 1
+    if plot_phase:
+        plot_phase_1d(chans_grid, info, p_ph_1d, sc)
+        print(f"  ✓ {p_ph_1d.name}   (pha thô 1D sc{sc_user:02d})")
+        n_saved += 1
+        plot_phase_heatmap(chans_grid, info, p_ph_hm)
+        print(f"  ✓ {p_ph_hm.name}   (pha thô heatmap)")
+        n_saved += 1
 
-    print(f"\n[Thành công] 4 đồ thị đã lưu vào {OUT_DIR_DEFAULT}")
+    print(f"\n[Thành công] {n_saved} đồ thị đã lưu vào {OUT_DIR_DEFAULT}")
     input("Nhấn Enter để thoát...")
 
 
