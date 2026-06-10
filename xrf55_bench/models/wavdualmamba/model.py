@@ -36,7 +36,7 @@ Per-branch (one per SELECTED subband s):
     subband_s (B, M*A, T2, F2)
       → Stem_s         per-subband conv (LL/HL/LH kernel) + GN + SiLU
                        [temporal_stride=2 → T2 500→250]
-      → TFBlock×2      dilation [1,2] → RF 7→19 timesteps (drop_path 0.0,0.05)
+      → TFBlock×3      dilation [1,2,4] → RF 7→19→43 timesteps (drop_path 0.0,0.05,0.1)
       → [FreqMix]      optional nonlinear subcarrier mix (freq_mix='mlp')
       → flatten F×C    (B, d_stem, T2, F2) → (B, T2, d_stem*F2)   ← KEEP frequency
       → Linear embed   d_stem*F2 → d_model + SiLU + Dropout(0.1) [+ optional PosEmb]
@@ -347,13 +347,13 @@ class FreqMix(nn.Module):
 # ─── Per-subband branch backbone (shareable) ──────────────────────────────────
 
 class BranchBackbone(nn.Module):
-    """TFBlock×2 (dilation 1,2) → flatten F×C → Linear embed [+ PosEmb] → BiMamba.
+    """TFBlock×3 (dilation 1,2,4) → flatten F×C → Linear embed [+ PosEmb] → BiMamba.
 
     Input  : (B, d_stem, T2, F2)    Output: (B, T2, d_model)
     """
 
     def __init__(self, d_stem: int, f2: int, d_model: int = 64,
-                 dp_cnn: tuple = (0.0, 0.05), dilations: tuple = (1, 2),
+                 dp_cnn: tuple = (0.0, 0.05, 0.1), dilations: tuple = (1, 2, 4),
                  n_mamba_layers: int = 2,
                  d_state: int = 32, d_conv: int = 4, expand: int = 2,
                  dp_mamba=(0.0, 0.10), bidirectional: bool = True,
@@ -593,8 +593,8 @@ class WavDualMamba(nn.Module):
         d_state        : Mamba SSM state size (default 32).
         n_mamba_layers : BiMamba layers per branch (default 2).
         f2             : subcarrier axis length after DWT (default 15).
-        dp_cnn         : DropPath per TFBlock (default (0.0, 0.05) for 2 blocks).
-        dilations      : dilation per TFBlock (default (1, 2) → RF 7, 19 timesteps).
+        dp_cnn         : DropPath per TFBlock (default (0.0, 0.05, 0.1) for 3 blocks).
+        dilations      : dilation per TFBlock (default (1, 2, 4) → RF 7, 19, 43 timesteps).
         embed_drop     : Dropout after Linear embed, before Mamba (default 0.1).
         temporal_stride: stride along time axis in the stem conv (default 1).
                          Set to 2 to halve T2 (500→250) for faster training.
@@ -647,8 +647,8 @@ class WavDualMamba(nn.Module):
         d_state: int = 32,
         n_mamba_layers: int = 2,
         f2: int = 15,
-        dp_cnn: tuple = (0.0, 0.05),
-        dilations: tuple = (1, 2),
+        dp_cnn: tuple = (0.0, 0.05, 0.1),
+        dilations: tuple = (1, 2, 4),
         dp_mamba=(0.0, 0.10),
         embed_drop: float = 0.1,
         temporal_stride: int = 1,

@@ -35,8 +35,8 @@ def infer_data_mode(stats: dict) -> str:
     """Infer 'proc' | 'raw' from stats.json meta.
 
     Processed stats (02_build_dataset_processed.py) carry a 'filter' key and
-    meta.source='raw_npy_270_hampel_lpf'.  Raw stats (01_build_dataset_raw.py)
-    use meta.source='raw_npy_270' with no filter key.
+    meta.source='raw_npy_nosc_270_hampel_lpf'.  Raw stats (01_build_dataset_raw.py)
+    use meta.source='raw_npy_nosc_270' with no filter key.
     """
     meta = stats.get('meta', {})
     if 'filter' in meta or 'hampel' in str(meta.get('source', '')).lower():
