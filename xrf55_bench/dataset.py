@@ -9,7 +9,6 @@ Model input shapes after normalization:
   resnet    → (270, 1000)          per-channel z-score (270,)
   tfmamba   → XH (500, 135)        per-channel z-score on XH = L·S·Hᵀ (pywt cV.T)
                XV (500, 135)        per-channel z-score on XV = H·S·Lᵀ (pywt cH.T)
-  wavmamba  → (27, 500, 15)        per-freq z-score (27, 15)
   wavdualmamba_haar → (18, 500, 15)  tfmamba Haar arrays re-packed as
                packed WavDualMamba input [HL ‖ LH] (ablation ladder S4)
 """
@@ -203,17 +202,13 @@ class PreprocWavMambaDataset(Dataset):
 _PREPROC_DS = {
     'resnet':            PreprocResNetDataset,
     'tfmamba':           PreprocTFMambaDataset,
-    'wavmamba':          PreprocWavMambaDataset,
-    'wavdualmamba':      PreprocWavMambaDataset,  # same data format as wavmamba
-    'wavdualmamba_v2':   PreprocWavMambaDataset,  # same data format as wavmamba
+    'wavdualmamba':      PreprocWavMambaDataset,
     'wavdualmamba_haar': PreprocTFMambaHaarAsWavDataset,  # [S4] tfmamba Haar files
 }
 _PREPROC_SENTINEL = {
     'resnet':            'resnet/X_train.npy',
     'tfmamba':           'tfmamba/X_train_xh.npy',
-    'wavmamba':          'wavmamba/X_train.npy',
-    'wavdualmamba':      'wavmamba/X_train.npy',  # same files
-    'wavdualmamba_v2':   'wavmamba/X_train.npy',  # same files
+    'wavdualmamba':      'wavmamba/X_train.npy',
     'wavdualmamba_haar': 'tfmamba/X_train_xh.npy',  # [S4] same files as tfmamba
 }
 
@@ -223,7 +218,7 @@ def build_loaders(model_name: str, stats: dict, bench_dir,
     """Build (train_loader, test_loader) from pre-built bench arrays.
 
     Args:
-        model_name : 'resnet', 'tfmamba', or 'wavmamba'
+        model_name : 'resnet', 'tfmamba', 'wavdualmamba', or 'wavdualmamba_haar'
         stats      : dict from load_stats(bench_dir)
         bench_dir  : path to bench/raw_nosc/ or bench/processed_nosc/
     """

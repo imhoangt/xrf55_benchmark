@@ -66,9 +66,8 @@ from xrf55_bench.utils.train_utils import (
 # ── Model configs ─────────────────────────────────────────────────────────────
 
 NUM_CLASSES  = 11
-_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba', 'wavdualmamba', 'wavdualmamba_v2',
-                'wavdualmamba_haar']
-_KWARGS_MODELS = ('tfmamba', 'wavdualmamba', 'wavdualmamba_v2', 'wavdualmamba_haar')
+_MODEL_NAMES = ['resnet', 'tfmamba', 'wavdualmamba', 'wavdualmamba_haar']
+_KWARGS_MODELS = ('tfmamba', 'wavdualmamba', 'wavdualmamba_haar')
 
 
 def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
@@ -79,7 +78,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
 
     model_kwargs: extra constructor kwargs forwarded to the model factory.
         Supported for 'tfmamba' (ablation-ladder flags pool/use_cnn/mamba),
-        'wavdualmamba' / 'wavdualmamba_v2' (arch, subbands, d_model, ...) and
+        'wavdualmamba' (arch, subbands, d_model, ...) and
         'wavdualmamba_haar' ([S4] WavDualMamba on tfmamba Haar arrays).
     """
     from xrf55_bench.utils.eval import evaluate, evaluate_full, measure_efficiency
@@ -115,17 +114,6 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
             input_shape  = ((500, 135), (500, 135)),
             meas_fn      = lambda m, d: measure_efficiency(m, d, ((500, 135), (500, 135))),
         )
-    if model_name == 'wavmamba':
-        from xrf55_bench.models.wavcnnmamba.model import WavMambaHAR
-        return dict(
-            factory      = lambda: WavMambaHAR(num_classes=NUM_CLASSES),
-            title        = 'WavMambaHAR',
-            is_2stream   = False,
-            eval_fn      = evaluate,
-            eval_full_fn = evaluate_full,
-            input_shape  = (27, 500, 15),
-            meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
-        )
     if model_name == 'wavdualmamba':
         from xrf55_bench.models.wavdualmamba.model import WavDualMamba
         return dict(
@@ -155,17 +143,6 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
             eval_full_fn = evaluate_full,
             input_shape  = (18, 500, 15),
             meas_fn      = lambda m, d: measure_efficiency(m, d, ((18, 500, 15),)),
-        )
-    if model_name == 'wavdualmamba_v2':
-        from xrf55_bench.models.wavdualmamba_v2.model import WavDualMambaV2
-        return dict(
-            factory      = lambda: WavDualMambaV2(num_classes=NUM_CLASSES, **model_kwargs),
-            title        = 'WavDualMambaV2',
-            is_2stream   = False,
-            eval_fn      = evaluate,
-            eval_full_fn = evaluate_full,
-            input_shape  = (27, 500, 15),
-            meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
         )
     raise ValueError(f"Unknown model '{model_name}'. Choose from: {_MODEL_NAMES}")
 
