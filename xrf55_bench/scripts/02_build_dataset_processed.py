@@ -103,8 +103,8 @@ def _transforms(arr: np.ndarray):
     """(270, 1000) float64 → Hampel+LPF → (flat, xh, xv, wav).
 
     flat : (270, 1000)   float32 — ResNet input
-    xh   : (500, 135)    float32 — TFMamba XH  (Haar cH.T)
-    xv   : (500, 135)    float32 — TFMamba XV  (Haar cV.T)
+    xh   : (500, 135)    float32 — TFMamba XH = L·S·Hᵀ  (= pywt cV.T)
+    xv   : (500, 135)    float32 — TFMamba XV = H·S·Lᵀ  (= pywt cH.T)
     wav  : (27, 500, 15) float32 — WavMamba    (db4 DWT)
     """
     # (270, 1000) → (9, 1000, 30): invert (antenna, sub, time) → (antenna, time, sub)
@@ -113,9 +113,12 @@ def _transforms(arr: np.ndarray):
     x9   = sosfiltfilt(_SOS, x9, axis=1).astype(np.float32)
     flat = x9.transpose(0, 2, 1).reshape(270, 1000)   # back to (270, 1000)
 
+    # TF-Mamba paper Eq.5 names quadrants by filter on (subcarrier, time) axes:
+    # XH = L·S·Hᵀ, XV = H·S·Lᵀ. pywt.dwt2 names them the other way around:
+    # cH = detail along axis 0 (subcarrier) = paper XV; cV = paper XH.
     _, (cH, cV, _) = pywt.dwt2(flat, 'haar', mode='periodization')
-    xh = cH.T   # (500, 135)
-    xv = cV.T   # (500, 135)
+    xh = cV.T   # (500, 135)
+    xv = cH.T   # (500, 135)
 
     wav = apply_dwt2_stack(x9[None])[0]   # (27, 500, 15)
 
@@ -181,6 +184,9 @@ def _compute_stats(all_files: list, npy_dir: Path) -> dict:
             'fitted_on':  'all_reps_1_to_20',
             'train_reps': TRAIN_REPS,
             'test_reps':  TEST_REPS,
+            # Marks builds made AFTER the cH/cV naming fix (xh file = paper XH
+            # = HL content). Legacy builds lack this key (xh file = LH content).
+            'tfmamba_subband_naming': 'paper-eq5',
         },
         'resnet':   {'mean': resnet_mean, 'std': resnet_std},
         'tfmamba':  {'xh_mean': xh_mean, 'xh_std': xh_std,
