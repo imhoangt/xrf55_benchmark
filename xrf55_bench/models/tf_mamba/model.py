@@ -48,6 +48,23 @@ Differences from original model.py
     Paper: "higher dimensional space" refers to the raw feature space M,
     not d_model. Optimal D′ = D = 64 confirmed by Table I.
     Linear(d_model, d_model) is correct; d_proj parameter kept for flexibility.
+
+Ablation flags (TF-Mamba → WavDualMamba; defaults = TF-Mamba baseline)
+─────────────────────────────────────────────────────────────────────────────
+    use_cnn=True      EmbeddingLayer → WavDualMamba CNN front-end
+                      (SubbandStem + dilated TFBlocks). PE is kept.
+    mamba='bi'        uni-Mamba×num_layers (d_state=16) → WavDualMamba gated
+                      BiMamba stack as one unit (×2 layers, d_state=32, final
+                      RMSNorm) — swaps direction, depth AND d_state together.
+    pool='attnstat'   GAP → AttnStatPool (attentive mean+std; classifier input
+                      doubles to 2·d_model).
+
+Each flag swaps ONE TF-Mamba block for its WavDualMamba counterpart. Blocks are
+IMPORTED from wavdualmamba.model (not copied), so they are byte-identical, and
+the flags compose freely. The canonical ladder — rung order, which flags are
+cumulative, and the higher rungs that move to the full WavDualMamba class on
+Haar data (via PreprocTFMambaHaarAsWavDataset, rung S4) — is defined in
+notebooks/ablation_ladder.ipynb, the single source of truth for rung numbering.
 """
 
 import math
@@ -60,6 +77,10 @@ except ImportError as _e:
         'mamba_ssm not installed. Run: pip install mamba-ssm\n'
         'Requires CUDA + compatible GPU.'
     ) from _e
+
+from xrf55_bench.models.wavdualmamba.model import (
+    AttnStatPool, BiMamba, SubbandStem, TFBlock,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,6 +130,62 @@ class EmbeddingLayer(nn.Module):
         return torch.relu(self.fc(x)) + self.pos(x)
 
 
+class CNNFrontEnd(nn.Module):
+    """WavDualMamba CNN front-end grafted onto a TF-Mamba stream (use_cnn=True).
+
+    Replaces EmbeddingLayer's Linear(M → d_model). The flat per-step feature
+    vector M = n_links · f2 (link-major: XRF55 has 135 = 9 links × 15 Haar
+    bins, and the Haar pairs never straddle link boundaries) is unflattened to
+    per-link 2-D maps, processed by the exact WavDualMamba blocks, then
+    flattened back and projected — mirroring BranchBackbone:
+
+        (B, L, M) → (B, n_links, L, f2)
+                  → SubbandStem(n_links → d_stem)
+                  → TFBlock × len(dilations)  (dilated, DropPath)
+                  → flatten (B, L, d_stem·f2)
+                  → Linear → SiLU → Dropout   (= BranchBackbone.embed)
+                  → (B, L, d_model)
+
+    Neutral (5,5) stem kernel for both streams: the per-subband physical
+    kernels {HL:(3,7), LH:(7,3)} are a WavDualMamba detail that belongs to the
+    full-WavDualMamba rung (S4), not the CNN-front-end flag.
+    """
+
+    def __init__(self, num_features: int, d_model: int, n_links: int = 9,
+                 d_stem: int = 16, dilations: tuple = (1, 2, 4),
+                 dp_cnn: tuple = (0.0, 0.05, 0.1), embed_drop: float = 0.1):
+        super().__init__()
+        if num_features % n_links != 0:
+            raise ValueError(
+                f"num_features={num_features} not divisible by n_links={n_links}")
+        if len(dp_cnn) != len(dilations):
+            raise ValueError(
+                f"len(dp_cnn)={len(dp_cnn)} must equal len(dilations)={len(dilations)}")
+        self.n_links = n_links
+        self.f2      = num_features // n_links
+        self.stem    = SubbandStem(n_links, d_stem, kernel=(5, 5))
+        self.blocks  = nn.ModuleList([
+            TFBlock(d_stem, dilation=dilations[i], drop_path=dp_cnn[i])
+            for i in range(len(dilations))
+        ])
+        self.embed   = nn.Sequential(
+            nn.Linear(d_stem * self.f2, d_model),
+            nn.SiLU(),
+            nn.Dropout(embed_drop),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, L, num_features)  →  (B, L, d_model)."""
+        B, L, M = x.shape
+        x = x.reshape(B, L, self.n_links, self.f2).permute(0, 2, 1, 3)  # (B,n,L,f2)
+        x = self.stem(x)                                  # (B, d_stem, L, f2)
+        for blk in self.blocks:
+            x = blk(x)                                    # (B, d_stem, L, f2)
+        B, C, T, Fd = x.shape
+        x = x.permute(0, 2, 1, 3).reshape(B, T, C * Fd)   # (B, L, d_stem·f2)
+        return self.embed(x)                              # (B, L, d_model)
+
+
 class TFMambaStream(nn.Module):
     """Single Mamba stream: EmbeddingLayer + P stacked pre-norm Mamba blocks.
 
@@ -130,6 +207,15 @@ class TFMambaStream(nn.Module):
       M_o = M + Linear(M_g)   ← exact match.
 
     Output shape: (B, L, d_model) — sequence is NEVER pooled here.
+
+    Ablation flags (defaults = TF-Mamba baseline):
+        use_cnn=True  EmbeddingLayer → CNNFrontEnd + PE (PE kept so this flag
+                      changes only the embedding; PE removal is part of the
+                      full-WavDualMamba rung).
+        mamba='bi'    uni-Mamba×num_layers → WavDualMamba BiMamba stack
+                      (bi_layers × gated BiMambaLayer + final RMSNorm; swaps
+                      the whole Mamba block as one unit: direction 1→2,
+                      depth num_layers→bi_layers, d_state→bi_d_state).
     """
 
     def __init__(
@@ -141,19 +227,51 @@ class TFMambaStream(nn.Module):
         expand:       int = 2,
         num_layers:   int = 3,
         max_len:      int = 500,
+        use_cnn:      bool = False,
+        mamba:        str = 'uni',
+        n_links:      int = 9,
+        d_stem:       int = 16,
+        dilations:    tuple = (1, 2, 4),
+        dp_cnn:       tuple = (0.0, 0.05, 0.1),
+        embed_drop:   float = 0.1,
+        bi_layers:    int = 2,
+        bi_d_state:   int = 32,
+        dp_bimamba:   tuple = (0.0, 0.10),
     ):
         super().__init__()
-        self.emb    = EmbeddingLayer(num_features, d_model, max_len)
-        self.norms  = nn.ModuleList(
-            [nn.LayerNorm(d_model) for _ in range(num_layers)]
-        )
-        self.mambas = nn.ModuleList(
-            [
-                Mamba(d_model=d_model, d_state=d_state,
-                      d_conv=d_conv, expand=expand)
-                for _ in range(num_layers)
-            ]
-        )
+        if mamba not in ('uni', 'bi'):
+            raise ValueError(f"mamba must be 'uni' or 'bi', got {mamba!r}")
+
+        if use_cnn:
+            self.frontend = CNNFrontEnd(
+                num_features, d_model, n_links=n_links, d_stem=d_stem,
+                dilations=dilations, dp_cnn=dp_cnn, embed_drop=embed_drop)
+            self.pos = PositionalEmbedding(d_model, max_len)
+            self.emb = None
+        else:
+            self.frontend = None
+            self.pos      = None
+            self.emb      = EmbeddingLayer(num_features, d_model, max_len)
+
+        if mamba == 'bi':
+            self.bimamba = BiMamba(
+                d_model, n_layers=bi_layers, d_state=bi_d_state,
+                d_conv=d_conv, expand=expand,
+                drop_path_rates=dp_bimamba, bidirectional=True)
+            self.norms  = None
+            self.mambas = None
+        else:
+            self.bimamba = None
+            self.norms   = nn.ModuleList(
+                [nn.LayerNorm(d_model) for _ in range(num_layers)]
+            )
+            self.mambas  = nn.ModuleList(
+                [
+                    Mamba(d_model=d_model, d_state=d_state,
+                          d_conv=d_conv, expand=expand)
+                    for _ in range(num_layers)
+                ]
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -162,7 +280,13 @@ class TFMambaStream(nn.Module):
         Returns:
             (B, L, d_model)  — full sequence, never pooled.
         """
-        x = self.emb(x)
+        if self.frontend is not None:
+            h = self.frontend(x)
+            x = h + self.pos(h)
+        else:
+            x = self.emb(x)
+        if self.bimamba is not None:
+            return self.bimamba(x)
         for norm, mamba in zip(self.norms, self.mambas):
             x = x + mamba(norm(x))   # pre-norm residual, Eq. 14
         return x
@@ -222,6 +346,22 @@ class TFMamba(nn.Module):
     d_conv       : Mamba depthwise-conv kernel size               (default 4)
     expand       : Mamba inner-dimension expansion factor         (default 2)
     max_len      : positional-encoding max sequence length L      (default 500)
+
+    Ablation flags (all defaults = TF-Mamba baseline)
+    ─────────────────────────────────────────────────────────
+    pool         : 'gap' (baseline) | 'attnstat'
+                   'attnstat' replaces GAP with WavDualMamba's AttnStatPool
+                   (context=True); classifier input becomes 2·d_model.
+    use_cnn      : False (baseline) | True
+                   Per-stream WavDualMamba CNN front-end replaces the Linear
+                   embedding (PE kept). See CNNFrontEnd.
+    mamba        : 'uni' (baseline) | 'bi'
+                   Swaps the whole Mamba stack for WavDualMamba's gated
+                   BiMamba (bi_layers=2, bi_d_state=32, final RMSNorm).
+    n_links, d_stem, dilations, dp_cnn, embed_drop   : CNNFrontEnd knobs
+    bi_layers, bi_d_state, dp_bimamba                : BiMamba knobs
+    Flags compose freely — see notebooks/ablation_ladder.ipynb for the
+    canonical rung order and numbering (the single source of truth).
     """
 
     def __init__(
@@ -234,8 +374,21 @@ class TFMamba(nn.Module):
         d_conv:       int = 4,
         expand:       int = 2,
         max_len:      int = 500,
+        pool:         str = 'gap',
+        use_cnn:      bool = False,
+        mamba:        str = 'uni',
+        n_links:      int = 9,
+        d_stem:       int = 16,
+        dilations:    tuple = (1, 2, 4),
+        dp_cnn:       tuple = (0.0, 0.05, 0.1),
+        embed_drop:   float = 0.1,
+        bi_layers:    int = 2,
+        bi_d_state:   int = 32,
+        dp_bimamba:   tuple = (0.0, 0.10),
     ):
         super().__init__()
+        if pool not in ('gap', 'attnstat'):
+            raise ValueError(f"pool must be 'gap' or 'attnstat', got {pool!r}")
 
         shared_kwargs = dict(
             num_features=num_features,
@@ -245,6 +398,16 @@ class TFMamba(nn.Module):
             expand=expand,
             num_layers=num_layers,
             max_len=max_len,
+            use_cnn=use_cnn,
+            mamba=mamba,
+            n_links=n_links,
+            d_stem=d_stem,
+            dilations=dilations,
+            dp_cnn=dp_cnn,
+            embed_drop=embed_drop,
+            bi_layers=bi_layers,
+            bi_d_state=bi_d_state,
+            dp_bimamba=dp_bimamba,
         )
 
         # Time-Mamba stream — XH (horizontal-detail DWT subband)
@@ -259,8 +422,16 @@ class TFMamba(nn.Module):
         # proj_s3: S2 → S3 with tanh  (D′ = D = 64, confirmed by Table I)
         self.proj_s3 = nn.Linear(d_model, d_model)
 
+        # Temporal pooling: GAP (baseline) or AttnStatPool (pool='attnstat')
+        if pool == 'attnstat':
+            self.tpool = AttnStatPool(d_model, context=True)
+            head_in    = 2 * d_model
+        else:
+            self.tpool = None
+            head_in    = d_model
+
         # Classifier
-        self.classifier = nn.Linear(d_model, num_classes)
+        self.classifier = nn.Linear(head_in, num_classes)
 
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -286,8 +457,11 @@ class TFMamba(nn.Module):
         # ── Step 3: linear projection + tanh ─────────────────────────────────
         S3 = torch.tanh(self.proj_s3(S2))    # (B, L, d_model)
 
-        # ── Step 4: Global Average Pooling ────────────────────────────────────
-        S3 = S3.mean(dim=1)                  # (B, d_model)
+        # ── Step 4: temporal pooling — GAP (baseline) or AttnStatPool ─────────
+        if self.tpool is not None:
+            S3 = self.tpool(S3)              # (B, 2·d_model)
+        else:
+            S3 = S3.mean(dim=1)              # (B, d_model)
 
         # ── Step 5: classifier ────────────────────────────────────────────────
         return self.classifier(S3)           # (B, num_classes)

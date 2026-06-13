@@ -63,7 +63,7 @@ Ablation flags:
     freq_mix       — None | 'mlp'. 'mlp' inserts a nonlinear MLP-Mixer over the
                      F subcarriers before flatten (zero-init ⇒ identity at step 0).
     expand, d_conv — Mamba SSM inner-expansion / local-conv width (capacity knobs).
-    use_eca        — [C7] ECA channel gate on raw 27-ch input before stems (default True).
+    use_eca        — [C7] ECA channel gate on raw 27-ch input before stems (default False).
     pool_context   — [C8] full ECAPA [x‖μ‖σ] context pooling in AttnStatPool (default True).
     use_final_attn — [C6] one MHSA layer after fusion, before pooling (default False).
 """
@@ -622,7 +622,7 @@ class WavDualMamba(nn.Module):
                          → SiLU → Linear(ratio·d→d), fc2 zero-init) after each Mamba
                          layer. Default 0 (no FFN, current behaviour).
         use_eca        : [C7] ECA channel gate on raw 27-ch input before stems.
-                         Default True. Set False to reproduce old v1 behaviour.
+                         Default False (headline benchmark config); True = ablation.
         pool_context   : [C8] pass [x‖μ‖σ] into AttnStatPool score (full ECAPA).
                          Default True. Set False to reproduce old v1 behaviour.
         use_final_attn : [C6] insert one MHSA layer after fusion, before pooling.
@@ -633,6 +633,8 @@ class WavDualMamba(nn.Module):
 
     Input  : X (B, 27, T2, F2), subband-major [LL | HL | LH] (27 = 3·M·A).
              Only the channels of the SELECTED subbands are processed.
+             Also accepts a PACKED input with 9·len(subbands) channels holding
+             only the selected subbands in canonical order (ablation adapters).
     Output : logits (B, num_classes).
     """
 
@@ -663,7 +665,7 @@ class WavDualMamba(nn.Module):
         t_max: int = 500,
         embed_hidden: int = None,
         ffn_ratio: int = 0,
-        use_eca: bool = True,
+        use_eca: bool = False,
         pool_context: bool = True,
         use_final_attn: bool = False,
         attn_heads: int = 4,
@@ -738,11 +740,14 @@ class WavDualMamba(nn.Module):
             raise ValueError(
                 f"Expected 4-D input (B, {self._c_in}, T2, F2), got {tuple(X.shape)}"
             )
-        if X.shape[1] != self._c_in:
+        packed_c = self.n_per_sub * self.n_branches
+        if X.shape[1] not in (self._c_in, packed_c):
             raise ValueError(
-                f"Expected {self._c_in} channels (= n_links*n_antennas*3), "
-                f"got {X.shape[1]}"
+                f"Expected {self._c_in} channels (full bench layout LL|HL|LH) or "
+                f"{packed_c} (packed: only the selected subbands {self.subbands}, "
+                f"in that order), got {X.shape[1]}"
             )
+        is_packed = X.shape[1] == packed_c
         if X.shape[-1] != self.f2:
             raise ValueError(
                 f"Expected F2={self.f2} subcarriers (model built with f2={self.f2}); "
@@ -755,8 +760,8 @@ class WavDualMamba(nn.Module):
 
         # Per-subband stems (always separate, physical kernels).
         stem_outs = []
-        for s in self.subbands:
-            i  = self._sb_index[s]
+        for k, s in enumerate(self.subbands):
+            i  = k if is_packed else self._sb_index[s]
             sb = X[:, i * self.n_per_sub:(i + 1) * self.n_per_sub]   # (B, M*A, T2, F2)
             stem_outs.append(self.stems[s](sb))                     # (B, d_stem, T2, F2)
 

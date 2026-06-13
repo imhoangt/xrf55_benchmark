@@ -7,9 +7,11 @@ Split: train=reps 1-14 (4620 samples), test=reps 15-20 (1980 samples). No val.
 
 Model input shapes after normalization:
   resnet    → (270, 1000)          per-channel z-score (270,)
-  tfmamba   → XH (500, 135)        per-channel z-score on cH.T
-               XV (500, 135)        per-channel z-score on cV.T
+  tfmamba   → XH (500, 135)        per-channel z-score on XH = L·S·Hᵀ (pywt cV.T)
+               XV (500, 135)        per-channel z-score on XV = H·S·Lᵀ (pywt cH.T)
   wavmamba  → (27, 500, 15)        per-freq z-score (27, 15)
+  wavdualmamba_haar → (18, 500, 15)  tfmamba Haar arrays re-packed as
+               packed WavDualMamba input [HL ‖ LH] (ablation ladder S4)
 """
 import json
 import random
@@ -101,6 +103,63 @@ class PreprocTFMambaDataset(Dataset):
         return torch.from_numpy(xh), torch.from_numpy(xv), int(self.y[idx])
 
 
+class PreprocTFMambaHaarAsWavDataset(Dataset):
+    """[Ablation ladder S4] TF-Mamba Haar arrays re-packed as WavDualMamba input.
+
+    Loads tfmamba X_{split}_xh/xv.npy (N, 500, 135), z-scores each file with its
+    own tfmamba stats, unflattens 135 = 9 links × 15 bins (link-major — Haar
+    pairs never straddle link boundaries since 30 is even), and stacks the two
+    detail subbands → (18, 500, 15), packed channel layout [HL(9) ‖ LH(9)]
+    matching WavDualMamba's canonical subband order for subbands=('HL','LH').
+
+    HL/LH content mapping depends on the dataset build vintage:
+      - builds AFTER the cH/cV naming fix carry
+        meta.tfmamba_subband_naming='paper-eq5'  → xh file holds HL content;
+      - LEGACY builds (no marker) stored the swapped naming → xh file holds LH.
+    Branch assignment only matters for WavDualMamba's per-subband stem kernels
+    {HL:(3,7), LH:(7,3)}; everything else is branch-symmetric.
+
+    Returns (X, label) with X float32 (18, 500, 15).
+    """
+
+    N_LINKS = 9
+
+    def __init__(self, bench_dir: Path, split: str, stats: dict):
+        bench_dir = Path(bench_dir)
+        self.XH = np.load(bench_dir / 'tfmamba' / f'X_{split}_xh.npy', mmap_mode='r')
+        self.XV = np.load(bench_dir / 'tfmamba' / f'X_{split}_xv.npy', mmap_mode='r')
+        self.y  = np.load(bench_dir / f'y_{split}.npy')
+        s = stats['tfmamba']
+        self.xh_mean = np.array(s['xh_mean'], dtype=np.float32)  # (135,)
+        self.xh_std  = np.array(s['xh_std'],  dtype=np.float32)
+        self.xv_mean = np.array(s['xv_mean'], dtype=np.float32)
+        self.xv_std  = np.array(s['xv_std'],  dtype=np.float32)
+
+        M = self.XH.shape[-1]
+        if M % self.N_LINKS != 0:
+            raise ValueError(f'Feature dim {M} not divisible by {self.N_LINKS} links')
+        self.f2 = M // self.N_LINKS
+
+        naming = stats.get('meta', {}).get('tfmamba_subband_naming')
+        self._hl_is_xh = (naming == 'paper-eq5')
+
+    def __len__(self):  return len(self.y)
+
+    def _to_maps(self, a: np.ndarray) -> np.ndarray:
+        """(T, 135) → (9, T, 15) — unflatten the link-major feature axis."""
+        T = a.shape[0]
+        return a.reshape(T, self.N_LINKS, self.f2).transpose(1, 0, 2)
+
+    def __getitem__(self, idx):
+        xh = (self.XH[idx] - self.xh_mean[None, :]) / self.xh_std[None, :]
+        xv = (self.XV[idx] - self.xv_mean[None, :]) / self.xv_std[None, :]
+        hl, lh = (xh, xv) if self._hl_is_xh else (xv, xh)
+        x = np.concatenate(
+            [self._to_maps(hl), self._to_maps(lh)], axis=0
+        ).astype(np.float32, copy=False)                  # (18, 500, 15)
+        return torch.from_numpy(x), int(self.y[idx])
+
+
 class PreprocWavMambaDataset(Dataset):
     """Loads wavmamba/X_{split}.npy, applies per-channel z-score. Returns (X, label)."""
 
@@ -124,18 +183,20 @@ class PreprocWavMambaDataset(Dataset):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _PREPROC_DS = {
-    'resnet':        PreprocResNetDataset,
-    'tfmamba':       PreprocTFMambaDataset,
-    'wavmamba':      PreprocWavMambaDataset,
-    'wavdualmamba':   PreprocWavMambaDataset,  # same data format as wavmamba
-    'wavdualmamba_v2': PreprocWavMambaDataset,  # same data format as wavmamba
+    'resnet':            PreprocResNetDataset,
+    'tfmamba':           PreprocTFMambaDataset,
+    'wavmamba':          PreprocWavMambaDataset,
+    'wavdualmamba':      PreprocWavMambaDataset,  # same data format as wavmamba
+    'wavdualmamba_v2':   PreprocWavMambaDataset,  # same data format as wavmamba
+    'wavdualmamba_haar': PreprocTFMambaHaarAsWavDataset,  # [S4] tfmamba Haar files
 }
 _PREPROC_SENTINEL = {
-    'resnet':           'resnet/X_train.npy',
-    'tfmamba':          'tfmamba/X_train_xh.npy',
-    'wavmamba':         'wavmamba/X_train.npy',
-    'wavdualmamba':     'wavmamba/X_train.npy',  # same files
-    'wavdualmamba_v2':  'wavmamba/X_train.npy',  # same files
+    'resnet':            'resnet/X_train.npy',
+    'tfmamba':           'tfmamba/X_train_xh.npy',
+    'wavmamba':          'wavmamba/X_train.npy',
+    'wavdualmamba':      'wavmamba/X_train.npy',  # same files
+    'wavdualmamba_v2':   'wavmamba/X_train.npy',  # same files
+    'wavdualmamba_haar': 'tfmamba/X_train_xh.npy',  # [S4] same files as tfmamba
 }
 
 

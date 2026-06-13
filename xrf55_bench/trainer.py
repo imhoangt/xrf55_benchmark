@@ -66,7 +66,9 @@ from xrf55_bench.utils.train_utils import (
 # ── Model configs ─────────────────────────────────────────────────────────────
 
 NUM_CLASSES  = 11
-_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba', 'wavdualmamba', 'wavdualmamba_v2']
+_MODEL_NAMES = ['resnet', 'tfmamba', 'wavmamba', 'wavdualmamba', 'wavdualmamba_v2',
+                'wavdualmamba_haar']
+_KWARGS_MODELS = ('tfmamba', 'wavdualmamba', 'wavdualmamba_v2', 'wavdualmamba_haar')
 
 
 def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
@@ -76,15 +78,16 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
     input_shapes lists each forward argument's shape (no batch dim).
 
     model_kwargs: extra constructor kwargs forwarded to the model factory.
-        Supported for 'wavdualmamba' and 'wavdualmamba_v2' (e.g. arch, subbands,
-        d_model, d_state, ffn_ratio, use_final_attn, ...) — used for ablations.
+        Supported for 'tfmamba' (ablation-ladder flags pool/use_cnn/mamba),
+        'wavdualmamba' / 'wavdualmamba_v2' (arch, subbands, d_model, ...) and
+        'wavdualmamba_haar' ([S4] WavDualMamba on tfmamba Haar arrays).
     """
     from xrf55_bench.utils.eval import evaluate, evaluate_full, measure_efficiency
 
     model_kwargs = model_kwargs or {}
-    if model_kwargs and model_name not in ('wavdualmamba', 'wavdualmamba_v2'):
+    if model_kwargs and model_name not in _KWARGS_MODELS:
         raise ValueError(
-            f"model_kwargs is only supported for 'wavdualmamba' / 'wavdualmamba_v2', "
+            f"model_kwargs is only supported for {_KWARGS_MODELS}, "
             f"got {model_name!r}")
 
     if model_name == 'resnet':
@@ -103,7 +106,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
         return dict(
             factory      = lambda: TFMamba(
                 num_features=135, d_model=64, num_layers=3,
-                num_classes=NUM_CLASSES, max_len=500,
+                num_classes=NUM_CLASSES, max_len=500, **model_kwargs,
             ),
             title        = 'TF-Mamba',
             is_2stream   = True,
@@ -133,6 +136,25 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
             eval_full_fn = evaluate_full,
             input_shape  = (27, 500, 15),
             meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
+        )
+    if model_name == 'wavdualmamba_haar':
+        # [Ablation ladder S4] WavDualMamba architecture on TF-Mamba's Haar
+        # {HL, LH} input (PreprocTFMambaHaarAsWavDataset → packed (18,500,15)).
+        from xrf55_bench.models.wavdualmamba.model import WavDualMamba
+        kw = dict(subbands=('HL', 'LH'))
+        kw.update(model_kwargs)
+        if tuple(kw['subbands']) != ('HL', 'LH'):
+            raise ValueError(
+                "wavdualmamba_haar provides only the Haar HL+LH subbands; "
+                f"subbands must stay ('HL','LH'), got {kw['subbands']!r}")
+        return dict(
+            factory      = lambda: WavDualMamba(num_classes=NUM_CLASSES, **kw),
+            title        = 'WavDualMamba (Haar HL+LH)',
+            is_2stream   = False,
+            eval_fn      = evaluate,
+            eval_full_fn = evaluate_full,
+            input_shape  = (18, 500, 15),
+            meas_fn      = lambda m, d: measure_efficiency(m, d, ((18, 500, 15),)),
         )
     if model_name == 'wavdualmamba_v2':
         from xrf55_bench.models.wavdualmamba_v2.model import WavDualMambaV2
