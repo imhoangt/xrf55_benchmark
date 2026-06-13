@@ -51,8 +51,8 @@ Differences from original model.py
 
 Ablation flags (TF-Mamba → WavDualMamba; defaults = TF-Mamba baseline)
 ─────────────────────────────────────────────────────────────────────────────
-    use_cnn=True      EmbeddingLayer → WavDualMamba CNN front-end
-                      (SubbandStem + dilated TFBlocks). PE is kept.
+    use_cnn=True      EmbeddingLayer → WavDualMamba CNN front-end: per-subband
+                      SubbandStem (HL (3,7) / LH (7,3)) + dilated TFBlocks. PE kept.
     mamba='bi'        uni-Mamba×num_layers (d_state=16) → WavDualMamba gated
                       BiMamba stack as one unit (×2 layers, d_state=32, final
                       RMSNorm) — swaps direction, depth AND d_state together.
@@ -79,7 +79,7 @@ except ImportError as _e:
     ) from _e
 
 from xrf55_bench.models.wavdualmamba.model import (
-    AttnStatPool, BiMamba, SubbandStem, TFBlock,
+    AttnStatPool, BiMamba, SubbandStem, TFBlock, _SUBBAND_KERNEL,
 )
 
 
@@ -146,14 +146,16 @@ class CNNFrontEnd(nn.Module):
                   → Linear → SiLU → Dropout   (= BranchBackbone.embed)
                   → (B, L, d_model)
 
-    Neutral (5,5) stem kernel for both streams: the per-subband physical
-    kernels {HL:(3,7), LH:(7,3)} are a WavDualMamba detail that belongs to the
-    full-WavDualMamba rung (S4), not the CNN-front-end flag.
+    Stem kernel is configurable via `kernel` (default (5,5)). TFMamba passes
+    WavDualMamba's exact per-subband kernels — HL (3,7) to stream_T, LH (7,3) to
+    stream_F — so this front-end is byte-identical to the WavDualMamba branch it
+    mirrors (subband_kernels=True; set False for a neutral (5,5) on both streams).
     """
 
     def __init__(self, num_features: int, d_model: int, n_links: int = 9,
                  d_stem: int = 16, dilations: tuple = (1, 2, 4),
-                 dp_cnn: tuple = (0.0, 0.05, 0.1), embed_drop: float = 0.1):
+                 dp_cnn: tuple = (0.0, 0.05, 0.1), embed_drop: float = 0.1,
+                 kernel: tuple = (5, 5)):
         super().__init__()
         if num_features % n_links != 0:
             raise ValueError(
@@ -163,7 +165,7 @@ class CNNFrontEnd(nn.Module):
                 f"len(dp_cnn)={len(dp_cnn)} must equal len(dilations)={len(dilations)}")
         self.n_links = n_links
         self.f2      = num_features // n_links
-        self.stem    = SubbandStem(n_links, d_stem, kernel=(5, 5))
+        self.stem    = SubbandStem(n_links, d_stem, kernel=kernel)
         self.blocks  = nn.ModuleList([
             TFBlock(d_stem, dilation=dilations[i], drop_path=dp_cnn[i])
             for i in range(len(dilations))
@@ -234,6 +236,7 @@ class TFMambaStream(nn.Module):
         dilations:    tuple = (1, 2, 4),
         dp_cnn:       tuple = (0.0, 0.05, 0.1),
         embed_drop:   float = 0.1,
+        stem_kernel:  tuple = (5, 5),
         bi_layers:    int = 2,
         bi_d_state:   int = 32,
         dp_bimamba:   tuple = (0.0, 0.10),
@@ -245,7 +248,8 @@ class TFMambaStream(nn.Module):
         if use_cnn:
             self.frontend = CNNFrontEnd(
                 num_features, d_model, n_links=n_links, d_stem=d_stem,
-                dilations=dilations, dp_cnn=dp_cnn, embed_drop=embed_drop)
+                dilations=dilations, dp_cnn=dp_cnn, embed_drop=embed_drop,
+                kernel=stem_kernel)
             self.pos = PositionalEmbedding(d_model, max_len)
             self.emb = None
         else:
@@ -355,6 +359,12 @@ class TFMamba(nn.Module):
     use_cnn      : False (baseline) | True
                    Per-stream WavDualMamba CNN front-end replaces the Linear
                    embedding (PE kept). See CNNFrontEnd.
+    subband_kernels : True (default) | False
+                   With use_cnn, give each stream WavDualMamba's exact physical
+                   stem kernel — stream_T=HL (3,7), stream_F=LH (7,3) — so the CNN
+                   front-end is byte-identical to WavDualMamba. False → neutral
+                   (5,5). Assumes the loader feeds HL content to stream_T
+                   (PreprocTFMambaDataset canonicalises this via the marker).
     mamba        : 'uni' (baseline) | 'bi'
                    Swaps the whole Mamba stack for WavDualMamba's gated
                    BiMamba (bi_layers=2, bi_d_state=32, final RMSNorm).
@@ -376,6 +386,7 @@ class TFMamba(nn.Module):
         max_len:      int = 500,
         pool:         str = 'gap',
         use_cnn:      bool = False,
+        subband_kernels: bool = True,
         mamba:        str = 'uni',
         n_links:      int = 9,
         d_stem:       int = 16,
@@ -410,11 +421,20 @@ class TFMamba(nn.Module):
             dp_bimamba=dp_bimamba,
         )
 
-        # Time-Mamba stream — XH (horizontal-detail DWT subband)
-        self.stream_T = TFMambaStream(**shared_kwargs)
+        # Per-stream stem kernel: when subband_kernels, hand each stream the
+        # EXACT WavDualMamba physical kernel (stream_T=XH=HL, stream_F=XV=LH).
+        # The loader feeds HL content to stream_T canonically (see
+        # PreprocTFMambaDataset), so kernel matches subband content and the
+        # S1–S3 CNN front-end is byte-identical to WavDualMamba's. Only takes
+        # effect with use_cnn=True; False → neutral (5,5) on both streams.
+        kT, kF = ((_SUBBAND_KERNEL['HL'], _SUBBAND_KERNEL['LH'])
+                  if subband_kernels else ((5, 5), (5, 5)))
 
-        # Freq-Mamba stream — XV (vertical-detail DWT subband)
-        self.stream_F = TFMambaStream(**shared_kwargs)
+        # Time-Mamba stream — XH = HL (horizontal-detail DWT subband)
+        self.stream_T = TFMambaStream(**shared_kwargs, stem_kernel=kT)
+
+        # Freq-Mamba stream — XV = LH (vertical-detail DWT subband)
+        self.stream_F = TFMambaStream(**shared_kwargs, stem_kernel=kF)
 
         # Adaptive fusion  [Eq. 15]
         self.fusion = AdaptiveFusion(d_model)

@@ -81,8 +81,24 @@ class PreprocResNetDataset(Dataset):
         return torch.from_numpy(x), int(self.y[idx])
 
 
+def _tfmamba_hl_is_xh(stats: dict) -> bool:
+    """True if the tfmamba xh file holds HL content (builds after the cH/cV
+    naming fix, marked meta.tfmamba_subband_naming=='paper-eq5'); False for
+    legacy builds where the xh file holds LH content. Single source for the
+    HL/LH vintage decision, shared by PreprocTFMambaDataset + the S4 adapter."""
+    return stats.get('meta', {}).get('tfmamba_subband_naming') == 'paper-eq5'
+
+
 class PreprocTFMambaDataset(Dataset):
-    """Loads tfmamba XH/XV arrays (N,500,135), normalizes. Returns (XH, XV, label)."""
+    """Loads tfmamba XH/XV arrays (N,500,135), normalizes, returns (S_T, S_F, label).
+
+    The two returned streams are CANONICALISED to (HL content, LH content) via
+    the tfmamba_subband_naming marker, so stream_T always carries the HL subband
+    regardless of build vintage. This lets TFMamba(subband_kernels=True) apply
+    WavDualMamba's physical stem kernels (stream_T=HL (3,7), stream_F=LH (7,3)) to
+    the matching content — same routing as the S4 adapter. Each file is z-scored
+    with its own tfmamba stats before the (symmetric) reorder.
+    """
 
     def __init__(self, bench_dir: Path, split: str, stats: dict):
         bench_dir = Path(bench_dir)
@@ -94,13 +110,16 @@ class PreprocTFMambaDataset(Dataset):
         self.xh_std  = np.array(s['xh_std'],  dtype=np.float32)
         self.xv_mean = np.array(s['xv_mean'], dtype=np.float32)  # (135,)
         self.xv_std  = np.array(s['xv_std'],  dtype=np.float32)
+        self._hl_is_xh = _tfmamba_hl_is_xh(stats)
 
     def __len__(self):  return len(self.y)
 
     def __getitem__(self, idx):
         xh = (self.XH[idx] - self.xh_mean[None, :]) / self.xh_std[None, :]  # (500, 135)
         xv = (self.XV[idx] - self.xv_mean[None, :]) / self.xv_std[None, :]  # (500, 135)
-        return torch.from_numpy(xh), torch.from_numpy(xv), int(self.y[idx])
+        # Canonical order: stream_T = HL content, stream_F = LH content.
+        st, sf = (xh, xv) if self._hl_is_xh else (xv, xh)
+        return torch.from_numpy(st), torch.from_numpy(sf), int(self.y[idx])
 
 
 class PreprocTFMambaHaarAsWavDataset(Dataset):
@@ -140,8 +159,7 @@ class PreprocTFMambaHaarAsWavDataset(Dataset):
             raise ValueError(f'Feature dim {M} not divisible by {self.N_LINKS} links')
         self.f2 = M // self.N_LINKS
 
-        naming = stats.get('meta', {}).get('tfmamba_subband_naming')
-        self._hl_is_xh = (naming == 'paper-eq5')
+        self._hl_is_xh = _tfmamba_hl_is_xh(stats)
 
     def __len__(self):  return len(self.y)
 
