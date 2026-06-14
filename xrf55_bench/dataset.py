@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pywt
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -195,6 +196,95 @@ class PreprocWavMambaDataset(Dataset):
         return torch.from_numpy(x), int(self.y[idx])
 
 
+# ── Haar LL subband helper (3-branch Haar ablation S4.1/S4.2) ───────────────────
+_LL_STATS_CACHE: dict = {}   # str(bench_dir) -> (mean(135,), std(135,)), all-reps
+
+
+def _haar_ll(flat: np.ndarray) -> np.ndarray:
+    """(270,1000) amplitude -> Haar LL subband (500,135) = pywt cA.T.
+
+    Uses the SAME dwt2 the build applied for xh/xv; since resnet/X holds the exact
+    `flat` that produced xh/xv, this LL is consistent with the stored HL/LH."""
+    cA = pywt.dwt2(np.asarray(flat, dtype=np.float32), 'haar', mode='periodization')[0]
+    return cA.T                                                # (500, 135)
+
+
+def _haar_ll_stats(bench_dir: Path):
+    """Per-feature (135,) mean/std of the Haar LL subband, fitted on ALL reps
+    (train+test) — same protocol the build uses for xh/xv. Cached per bench_dir."""
+    key = str(bench_dir)
+    if key in _LL_STATS_CACHE:
+        return _LL_STATS_CACHE[key]
+    s  = np.zeros(135, dtype=np.float64)
+    s2 = np.zeros(135, dtype=np.float64)
+    n  = np.int64(0)
+    for split in ('train', 'test'):
+        R = np.load(bench_dir / 'resnet' / f'X_{split}.npy', mmap_mode='r')
+        for i in range(R.shape[0]):
+            ll = _haar_ll(R[i]).astype(np.float64)             # (500, 135)
+            s  += ll.sum(axis=0)
+            s2 += (ll * ll).sum(axis=0)
+            n  += ll.shape[0]
+    mean = s / n
+    std  = np.maximum(np.sqrt(np.maximum(s2 / n - mean * mean, 0.0)), 1e-6)
+    out = (mean.astype(np.float32), std.astype(np.float32))
+    _LL_STATS_CACHE[key] = out
+    return out
+
+
+class PreprocTFMambaHaar3AsWavDataset(Dataset):
+    """[Ablation S4.1/S4.2] Haar 3-branch (LL,HL,LH) packed for WavDualMamba.
+
+    HL,LH reuse tfmamba X_{split}_xh/xv.npy z-scored with their own stats
+    (identical to S4). LL is computed on-the-fly from resnet/X_{split}.npy
+    (the exact `flat` the build fed to dwt2, so LL matches the stored HL/LH)
+    and z-scored with all-reps LL stats. Returns (X, label) with X float32
+    (27, 500, 15) in canonical subband order [LL | HL | LH].
+    """
+
+    N_LINKS = 9
+
+    def __init__(self, bench_dir: Path, split: str, stats: dict):
+        bench_dir = Path(bench_dir)
+        self.XH = np.load(bench_dir / 'tfmamba' / f'X_{split}_xh.npy', mmap_mode='r')
+        self.XV = np.load(bench_dir / 'tfmamba' / f'X_{split}_xv.npy', mmap_mode='r')
+        self.R  = np.load(bench_dir / 'resnet'  / f'X_{split}.npy',    mmap_mode='r')
+        self.y  = np.load(bench_dir / f'y_{split}.npy')
+        s = stats['tfmamba']
+        self.xh_mean = np.array(s['xh_mean'], dtype=np.float32)
+        self.xh_std  = np.array(s['xh_std'],  dtype=np.float32)
+        self.xv_mean = np.array(s['xv_mean'], dtype=np.float32)
+        self.xv_std  = np.array(s['xv_std'],  dtype=np.float32)
+
+        M = self.XH.shape[-1]
+        if M % self.N_LINKS != 0:
+            raise ValueError(f'Feature dim {M} not divisible by {self.N_LINKS} links')
+        self.f2 = M // self.N_LINKS
+        if len(self.R) != len(self.XH):
+            raise ValueError(
+                f'resnet ({len(self.R)}) and tfmamba ({len(self.XH)}) sample counts differ')
+
+        self._hl_is_xh = _tfmamba_hl_is_xh(stats)
+        self.ll_mean, self.ll_std = _haar_ll_stats(bench_dir)   # all-reps, cached
+
+    def __len__(self):  return len(self.y)
+
+    def _to_maps(self, a: np.ndarray) -> np.ndarray:
+        """(T, 135) -> (9, T, 15) — unflatten the link-major feature axis."""
+        T = a.shape[0]
+        return a.reshape(T, self.N_LINKS, self.f2).transpose(1, 0, 2)
+
+    def __getitem__(self, idx):
+        xh = (self.XH[idx] - self.xh_mean[None, :]) / self.xh_std[None, :]
+        xv = (self.XV[idx] - self.xv_mean[None, :]) / self.xv_std[None, :]
+        ll = (_haar_ll(self.R[idx]) - self.ll_mean[None, :]) / self.ll_std[None, :]
+        hl, lh = (xh, xv) if self._hl_is_xh else (xv, xh)
+        x = np.concatenate(
+            [self._to_maps(ll), self._to_maps(hl), self._to_maps(lh)], axis=0
+        ).astype(np.float32, copy=False)                  # (27, 500, 15) = LL|HL|LH
+        return torch.from_numpy(x), int(self.y[idx])
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Loader factory
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -203,13 +293,15 @@ _PREPROC_DS = {
     'resnet':            PreprocResNetDataset,
     'tfmamba':           PreprocTFMambaDataset,
     'wavdualmamba':      PreprocWavMambaDataset,
-    'wavdualmamba_haar': PreprocTFMambaHaarAsWavDataset,  # [S4] tfmamba Haar files
+    'wavdualmamba_haar': PreprocTFMambaHaarAsWavDataset,   # [S4] tfmamba Haar files
+    'wavdualmamba_haar3': PreprocTFMambaHaar3AsWavDataset,  # [S4.1/S4.2] Haar LL+HL+LH
 }
 _PREPROC_SENTINEL = {
     'resnet':            'resnet/X_train.npy',
     'tfmamba':           'tfmamba/X_train_xh.npy',
     'wavdualmamba':      'wavmamba/X_train.npy',
-    'wavdualmamba_haar': 'tfmamba/X_train_xh.npy',  # [S4] same files as tfmamba
+    'wavdualmamba_haar': 'tfmamba/X_train_xh.npy',   # [S4] same files as tfmamba
+    'wavdualmamba_haar3': 'resnet/X_train.npy',       # [S4.1/S4.2] needs resnet for Haar LL
 }
 
 

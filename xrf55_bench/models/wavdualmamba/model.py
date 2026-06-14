@@ -623,6 +623,8 @@ class WavDualMamba(nn.Module):
                          layer. Default 0 (no FFN, current behaviour).
         use_eca        : [C7] ECA channel gate on raw 27-ch input before stems.
                          Default False (headline benchmark config); True = ablation.
+        pool           : 'attnstat' (default) | 'gap'. 'gap' replaces AttnStatPool
+                         with global average pooling (head input d_model, not 2*d_model).
         pool_context   : [C8] pass [x‖μ‖σ] into AttnStatPool score (full ECAPA).
                          Default True. Set False to reproduce old v1 behaviour.
         use_final_attn : [C6] insert one MHSA layer after fusion, before pooling.
@@ -666,6 +668,7 @@ class WavDualMamba(nn.Module):
         embed_hidden: int = None,
         ffn_ratio: int = 0,
         use_eca: bool = False,
+        pool: str = 'attnstat',
         pool_context: bool = True,
         use_final_attn: bool = False,
         attn_heads: int = 4,
@@ -675,6 +678,8 @@ class WavDualMamba(nn.Module):
         super().__init__()
         if len(dp_mamba) != n_mamba_layers:
             raise ValueError("len(dp_mamba) must equal n_mamba_layers")
+        if pool not in ('attnstat', 'gap'):
+            raise ValueError(f"pool must be 'attnstat' or 'gap', got {pool!r}")
 
         # Normalise & validate the selected subbands.
         sel = [s for s in _SUBBAND_ORDER if s in subbands]   # keep canonical order
@@ -726,8 +731,14 @@ class WavDualMamba(nn.Module):
         self.final_attn = (FinalAttention(d_model, n_heads=attn_heads,
                                           attn_drop=attn_drop, drop_path=attn_drop_path)
                            if use_final_attn else None)
-        self.tpool  = AttnStatPool(d_model, context=pool_context)
-        self.head   = Classifier(2 * d_model, num_classes=num_classes,
+        # Temporal pooling: AttnStatPool (default, -> 2*d_model) or GAP (-> d_model).
+        if pool == 'gap':
+            self.tpool = None
+            head_in    = d_model
+        else:
+            self.tpool = AttnStatPool(d_model, context=pool_context)
+            head_in    = 2 * d_model
+        self.head   = Classifier(head_in, num_classes=num_classes,
                                  dropout=dropout)
 
     @property
@@ -779,7 +790,7 @@ class WavDualMamba(nn.Module):
         z = self.fusion(streams)                                    # (B, T2, d_model)
         if self.final_attn is not None:
             z = self.final_attn(z)                                  # [C6] optional MHSA
-        z = self.tpool(z)                                           # (B, 2*d_model)
+        z = self.tpool(z) if self.tpool is not None else z.mean(dim=1)  # AttnStatPool or GAP
         return self.head(z)                                         # (B, num_classes)
 
 

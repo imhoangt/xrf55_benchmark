@@ -66,8 +66,8 @@ from xrf55_bench.utils.train_utils import (
 # ── Model configs ─────────────────────────────────────────────────────────────
 
 NUM_CLASSES  = 11
-_MODEL_NAMES = ['resnet', 'tfmamba', 'wavdualmamba', 'wavdualmamba_haar']
-_KWARGS_MODELS = ('tfmamba', 'wavdualmamba', 'wavdualmamba_haar')
+_MODEL_NAMES = ['resnet', 'tfmamba', 'wavdualmamba', 'wavdualmamba_haar', 'wavdualmamba_haar3']
+_KWARGS_MODELS = ('tfmamba', 'wavdualmamba', 'wavdualmamba_haar', 'wavdualmamba_haar3')
 
 
 def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
@@ -143,6 +143,21 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
             eval_full_fn = evaluate_full,
             input_shape  = (18, 500, 15),
             meas_fn      = lambda m, d: measure_efficiency(m, d, ((18, 500, 15),)),
+        )
+    if model_name == 'wavdualmamba_haar3':
+        # [Ablation S4.1/S4.2] WavDualMamba on Haar 3 subbands (LL,HL,LH). The
+        # adapter packs (27,500,15)=[LL|HL|LH]; pool via model_kwargs ('attnstat'|'gap').
+        from xrf55_bench.models.wavdualmamba.model import WavDualMamba
+        kw = dict(model_kwargs)
+        kw['subbands'] = ('LL', 'HL', 'LH')   # adapter always provides all 3, packed
+        return dict(
+            factory      = lambda: WavDualMamba(num_classes=NUM_CLASSES, **kw),
+            title        = 'WavDualMamba (Haar LL+HL+LH)',
+            is_2stream   = False,
+            eval_fn      = evaluate,
+            eval_full_fn = evaluate_full,
+            input_shape  = (27, 500, 15),
+            meas_fn      = lambda m, d: measure_efficiency(m, d, ((27, 500, 15),)),
         )
     raise ValueError(f"Unknown model '{model_name}'. Choose from: {_MODEL_NAMES}")
 
