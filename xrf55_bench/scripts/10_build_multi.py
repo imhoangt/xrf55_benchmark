@@ -38,20 +38,35 @@ SPLIT_SEED = 42   # fixed 80/20 split, reproducible across the 5 model-init seed
 # (which nest the files under a different prefix, e.g. /kaggle/input/hust_dataset/
 # HUST-HAR/..., /kaggle/input/ut_har_dataset/data/..., .../ntu_fi_dataset/train_amp/).
 
+def _listing(root, n=50):
+    return sorted(str(p.relative_to(root)) for p in Path(root).rglob('*') if p.is_file())[:n]
+
+
 def _find(root: Path, name: str) -> Path:
     """First path under root whose final component == name (file or dir)."""
     hit = next(Path(root).rglob(name), None)
     if hit is None:
-        raise FileNotFoundError(f"'{name}' not found under {root}")
+        raise FileNotFoundError(f"'{name}' not found under {root}. Files seen: {_listing(root)}")
     return hit
 
 
 def load_hust(root):
-    """HUST-HAR: (3600, 270, 1000) float32, 6 classes. Random 80/20 (seed 42)."""
+    """HUST-HAR: (3600, 270, 1000) float32, 6 classes. Random 80/20 (seed 42).
+
+    Robust file discovery: labels = the file with 'label' in its name; data = the
+    largest remaining non-text file (works regardless of exact name / extension,
+    e.g. HUST_HAR_dataset-001.pt or a renamed variant on Kaggle)."""
     import torch
-    ptf = next(Path(root).rglob('HUST_HAR_dataset*.pt'), None) \
-        or _find(root, 'HUST_HAR_dataset-001.pt')
-    lbf = _find(root, 'HUST_HAR_labels.pt')
+    root  = Path(root)
+    files = [p for p in root.rglob('*') if p.is_file()]
+    lbf   = next((p for p in files if 'label' in p.name.lower()), None)
+    cand  = [p for p in files if p is not lbf and 'label' not in p.name.lower()
+             and p.suffix.lower() not in ('.txt', '.md', '.json', '.csv')]
+    ptf   = max(cand, key=lambda p: p.stat().st_size) if cand else None
+    if ptf is None or lbf is None:
+        raise FileNotFoundError(
+            f"HUST data/labels not found under {root}. Files seen: {_listing(root)}")
+    print(f'  HUST data={ptf.name} ({ptf.stat().st_size/1e9:.2f}GB)  labels={lbf.name}')
     d = torch.load(ptf, map_location='cpu', weights_only=False)
     y = torch.load(lbf, map_location='cpu', weights_only=False)
     X = d.numpy().astype(np.float32)             # (3600, 270, 1000)
