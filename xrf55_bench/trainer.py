@@ -70,11 +70,14 @@ _MODEL_NAMES = ['resnet', 'tfmamba', 'wavdualmamba', 'wavdualmamba_haar', 'wavdu
 _KWARGS_MODELS = ('tfmamba', 'wavdualmamba', 'wavdualmamba_haar', 'wavdualmamba_haar3')
 
 
-def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
+def _get_model_cfg(model_name: str, model_kwargs: dict = None,
+                   num_classes: int = NUM_CLASSES) -> dict:
     """Return model config dict with lazy-loaded model imports.
 
     eval/efficiency are the unified helpers in utils.eval (1- and 2-stream aware).
     input_shapes lists each forward argument's shape (no batch dim).
+
+    num_classes: output-class count (default 11 = XRF55). Pass 6/7 for HUST/UT-HAR.
 
     model_kwargs: extra constructor kwargs forwarded to the model factory.
         Supported for 'tfmamba' (ablation-ladder flags pool/use_cnn/mamba),
@@ -92,7 +95,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
     if model_name == 'resnet':
         from xrf55_bench.models.resnet1d.model import resnet18
         return dict(
-            factory      = lambda: resnet18(inchannel=270, num_classes=NUM_CLASSES),
+            factory      = lambda: resnet18(inchannel=270, num_classes=num_classes),
             title        = 'ResNet18-1D',
             is_2stream   = False,
             eval_fn      = evaluate,
@@ -105,7 +108,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
         return dict(
             factory      = lambda: TFMamba(
                 num_features=135, d_model=64, num_layers=3,
-                num_classes=NUM_CLASSES, max_len=500, **model_kwargs,
+                num_classes=num_classes, max_len=500, **model_kwargs,
             ),
             title        = 'TF-Mamba',
             is_2stream   = True,
@@ -117,7 +120,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
     if model_name == 'wavdualmamba':
         from xrf55_bench.models.wavdualmamba.model import WavDualMamba
         return dict(
-            factory      = lambda: WavDualMamba(num_classes=NUM_CLASSES, **model_kwargs),
+            factory      = lambda: WavDualMamba(num_classes=num_classes, **model_kwargs),
             title        = 'WavDualMamba',
             is_2stream   = False,
             eval_fn      = evaluate,
@@ -136,7 +139,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
                 "wavdualmamba_haar provides only the Haar HL+LH subbands; "
                 f"subbands must stay ('HL','LH'), got {kw['subbands']!r}")
         return dict(
-            factory      = lambda: WavDualMamba(num_classes=NUM_CLASSES, **kw),
+            factory      = lambda: WavDualMamba(num_classes=num_classes, **kw),
             title        = 'WavDualMamba (Haar HL+LH)',
             is_2stream   = False,
             eval_fn      = evaluate,
@@ -151,7 +154,7 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None) -> dict:
         kw = dict(model_kwargs)
         kw['subbands'] = ('LL', 'HL', 'LH')   # adapter always provides all 3, packed
         return dict(
-            factory      = lambda: WavDualMamba(num_classes=NUM_CLASSES, **kw),
+            factory      = lambda: WavDualMamba(num_classes=num_classes, **kw),
             title        = 'WavDualMamba (Haar LL+HL+LH)',
             is_2stream   = False,
             eval_fn      = evaluate,
@@ -319,7 +322,19 @@ def main(model_name: str, output_dir,
          bench_dir=None,
          cfg: TrainCfg = None,
          num_workers: int = 4,
-         model_kwargs: dict = None):
+         model_kwargs: dict = None,
+         num_classes: int = NUM_CLASSES,
+         class_names: list = None,
+         dataset_name: str = None,
+         split_desc: str = None):
+    """num_classes / class_names default to XRF55 (11, ACTION_NAMES). Override
+    for other datasets (HUST=6, UT-HAR=7, NTU-Fi=6) so eval/CM use the right labels.
+
+    dataset_name / split_desc label metrics.json + plot titles for the dataset
+    (default XRF55 when not given)."""
+    if class_names is None:
+        class_names = ACTION_NAMES
+    bench_label = f'{dataset_name} ·' if dataset_name else 'XRF55 Bench'
     if cfg is None:
         cfg = TrainCfg_for_protocol('02')
     if not cfg.seeds:
@@ -336,7 +351,7 @@ def main(model_name: str, output_dir,
     configure_speed_mode()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    mc           = _get_model_cfg(model_name, model_kwargs)
+    mc           = _get_model_cfg(model_name, model_kwargs, num_classes=num_classes)
     model_title  = mc['title']
     is_2stream   = mc['is_2stream']
     eval_fn      = mc['eval_fn']
@@ -476,7 +491,7 @@ def main(model_name: str, output_dir,
         model.load_state_dict(
             torch_load_checkpoint(seed_dir / 'last_model.pt', map_location=device))
         acc, f1, f1_per_cls, cm, all_preds, all_probs, all_labels = \
-            eval_full_fn(model, test_loader, device, NUM_CLASSES)
+            eval_full_fn(model, test_loader, device, num_classes)
 
         np.savez(seed_dir / 'test_predictions.npz',
                  predictions=np.array(all_preds),
@@ -507,8 +522,13 @@ def main(model_name: str, output_dir,
         return
 
     # ── Efficiency (once, last seed's model) ──────────────────────────────────
+    # Derive the dummy-input shapes from a real test batch so they always match
+    # the actual data dims (XRF55 / HUST / UT-HAR / NTU-Fi) — no hardcoded shape.
+    from xrf55_bench.utils.eval import measure_efficiency
+    _sample      = next(iter(test_loader))
+    meas_shapes  = tuple(tuple(int(d) for d in t.shape[1:]) for t in _sample[:-1])
     params_m, model_size_mb, macs_g, macs_note, lat_mean, lat_std = \
-        meas_fn(model, device)
+        measure_efficiency(model, device, meas_shapes)
 
     # ── Aggregate summary ─────────────────────────────────────────────────────
     accs       = [v['test_accuracy'] for v in per_seed_results.values()]
@@ -543,16 +563,18 @@ def main(model_name: str, output_dir,
         print('═' * 65)
 
     # ── Plots ─────────────────────────────────────────────────────────────────
-    _plot_training_curve(per_seed_log_rows, plots_dir, model_title)
+    plot_title = f'{bench_label} {model_title}'
+    _plot_training_curve(per_seed_log_rows, plots_dir, plot_title)
     _plot_confusion_matrix(
         {s: v['test_confusion_matrix'] for s, v in per_seed_results.items()},
-        ACTION_NAMES, plots_dir, model_title)
+        class_names, plots_dir, plot_title)
     if len(cfg.seeds) > 1:
-        _plot_seed_comparison(per_seed_results, plots_dir, model_title)
+        _plot_seed_comparison(per_seed_results, plots_dir, plot_title)
 
     # ── metrics.json ──────────────────────────────────────────────────────────
     metrics = build_metrics(model_name, bench_dir, cfg, per_seed_results, summary,
-                            model_kwargs=model_kwargs)
+                            model_kwargs=model_kwargs,
+                            dataset=dataset_name, split=split_desc)
     save_metrics(output_dir, metrics)
 
     # ── run_config.json — compact top-level manifest ──────────────────────────
@@ -562,8 +584,9 @@ def main(model_name: str, output_dir,
         'gpu':   (torch.cuda.get_device_name(0)
                   if torch.cuda.is_available() else None),
     }
+    _manifest_shape = meas_shapes[0] if len(meas_shapes) == 1 else meas_shapes
     run_config = build_run_config(
-        model_name, metrics, output_dir, stats, mc['input_shape'], env)
+        model_name, metrics, output_dir, stats, _manifest_shape, env)
     save_run_config(output_dir, run_config)
 
     # ── ZIP ───────────────────────────────────────────────────────────────────
@@ -576,18 +599,26 @@ def main(model_name: str, output_dir,
 
 def run(model_name: str, bench_dir=None,
         output_dir=None, train_cfg=None,
-        num_workers: int = 4, model_kwargs: dict = None):
+        num_workers: int = 4, model_kwargs: dict = None,
+        num_classes: int = NUM_CLASSES, class_names: list = None,
+        dataset_name: str = None, split_desc: str = None):
     """Callable entry point for Kaggle notebooks.
 
     model_kwargs: extra model constructor kwargs (wavdualmamba only), e.g.
         run('wavdualmamba', ..., model_kwargs={'subbands': ('HL', 'LH')})
         to run a subband ablation.
+
+    num_classes / class_names / dataset_name / split_desc: override for non-XRF55
+        datasets (HUST/UT-HAR/NTU-Fi) so eval, confusion-matrix labels and
+        metrics metadata are correct. Default to XRF55 when not given.
     """
     _bench = Path(bench_dir)  if bench_dir  else _default_bench_dir()
     _out   = Path(output_dir) if output_dir else _default_output_dir(model_name)
     main(model_name, _out,
          bench_dir=_bench,
-         cfg=train_cfg, num_workers=num_workers, model_kwargs=model_kwargs)
+         cfg=train_cfg, num_workers=num_workers, model_kwargs=model_kwargs,
+         num_classes=num_classes, class_names=class_names,
+         dataset_name=dataset_name, split_desc=split_desc)
 
 
 def _default_bench_dir():

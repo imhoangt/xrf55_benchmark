@@ -54,7 +54,7 @@ def _plot_training_curve(log_per_seed: dict, plots_dir: Path, title: str):
     ax2.tick_params(axis='y', colors=_ACC_COLOR)
     ax2.set_ylim(0, 105)
     ax1.grid(True, alpha=0.3)
-    ax1.set_title(f'XRF55 Bench {title} — Training Curve')
+    ax1.set_title(f'{title} — Training Curve')
 
     if not multi:
         loss_handles[0].set_label('Loss')
@@ -98,7 +98,7 @@ def _plot_confusion_matrix(cms_per_seed: dict, class_names: list,
     ax.set_xlabel('Predicted'); ax.set_ylabel('True')
     n = len(cms_per_seed)
     suffix = f' (avg {n} seeds)' if n > 1 else ''
-    ax.set_title(f'XRF55 Bench {title} — Confusion Matrix (normalized){suffix}')
+    ax.set_title(f'{title} — Confusion Matrix (normalized){suffix}')
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     for i in range(n_cls):
         for j in range(n_cls):
@@ -130,7 +130,7 @@ def _plot_seed_comparison(per_seed_results: dict, plots_dir: Path, title: str):
     y_lo = max(0.0, min(accs + f1s) - 5)
     ax.set_ylim(y_lo, 105)
     ax.set_title(
-        f'XRF55 Bench {title} — Seed Comparison\n'
+        f'{title} — Seed Comparison\n'
         f'acc = {acc_mean:.2f}% ± {np.std(accs):.2f}%  '
         f'macro_f1 = {f1_mean:.2f}% ± {np.std(f1s):.2f}%'
     )
@@ -202,13 +202,19 @@ def save_combined_zip(output_dir: Path, seeds) -> Path:
 
 def build_metrics(model_name: str, bench_dir, cfg,
                   per_seed_results: dict, summary: dict,
-                  model_kwargs: dict = None) -> dict:
+                  model_kwargs: dict = None,
+                  dataset: str = None, split: str = None) -> dict:
     """Assemble the full metrics dict from training results.
 
     cfg: TrainCfg instance (duck-typed to avoid circular imports).
     model_kwargs: extra model-constructor kwargs (e.g. ablation subbands),
         recorded under 'model_config' for traceability.
+    dataset/split: dataset name + split description for metadata. Default to
+        XRF55 values when not given (backward compatible); HUST/UT-HAR/NTU-Fi
+        pass their own so metrics.json is labelled correctly.
     """
+    dataset = dataset or 'xrf55'
+    split   = split   or 'train=reps1-14  test=reps15-20'
     cfg_dict = {
         k: list(v) if isinstance(v, tuple) else v
         for k, v in dataclasses.asdict(cfg).items()
@@ -219,8 +225,8 @@ def build_metrics(model_name: str, bench_dir, cfg,
     }
     return {
         'model':        f'xrf55_bench_{model_name}',
-        'dataset':      'xrf55',
-        'split':        'train=reps1-14  test=reps15-20',
+        'dataset':      dataset,
+        'split':        split,
         'eval':         ('Reported metrics (per_seed.test_* and summary.test_*) come '
                          'from last_model.pt = final epoch. The per_seed.best_epoch / '
                          'best_test_acc fields are train-time diagnostics selected by '
