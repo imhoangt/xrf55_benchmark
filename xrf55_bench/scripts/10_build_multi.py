@@ -33,14 +33,27 @@ SPLIT_SEED = 42   # fixed 80/20 split, reproducible across the 5 model-init seed
 
 
 # ── Dataset loaders → (X_all (N, n_ant*sub, time) float32, y_all (N,) int64) ────
+# Each loader takes a `root` and AUTO-DETECTS its files via rglob, so it works for
+# both the local layout (dataset/<DIR>/...) and the Kaggle dataset mounts
+# (which nest the files under a different prefix, e.g. /kaggle/input/hust_dataset/
+# HUST-HAR/..., /kaggle/input/ut_har_dataset/data/..., .../ntu_fi_dataset/train_amp/).
 
-def load_hust():
-    """HUST-HAR: (3600, 270, 1000) float32, 6 classes. Random 80/20 (orig repo)."""
+def _find(root: Path, name: str) -> Path:
+    """First path under root whose final component == name (file or dir)."""
+    hit = next(Path(root).rglob(name), None)
+    if hit is None:
+        raise FileNotFoundError(f"'{name}' not found under {root}")
+    return hit
+
+
+def load_hust(root):
+    """HUST-HAR: (3600, 270, 1000) float32, 6 classes. Random 80/20 (seed 42)."""
     import torch
-    d = torch.load(DATA_ROOT / 'HUST-HAR' / 'HUST_HAR_dataset-001.pt',
-                   map_location='cpu', weights_only=False)
-    y = torch.load(DATA_ROOT / 'HUST-HAR' / 'HUST_HAR_labels.pt',
-                   map_location='cpu', weights_only=False)
+    ptf = next(Path(root).rglob('HUST_HAR_dataset*.pt'), None) \
+        or _find(root, 'HUST_HAR_dataset-001.pt')
+    lbf = _find(root, 'HUST_HAR_labels.pt')
+    d = torch.load(ptf, map_location='cpu', weights_only=False)
+    y = torch.load(lbf, map_location='cpu', weights_only=False)
     X = d.numpy().astype(np.float32)             # (3600, 270, 1000)
     y = y.numpy().astype(np.int64)
     n = len(X)
@@ -51,19 +64,18 @@ def load_hust():
     return X, y, splits
 
 
-def load_uthar():
+def load_uthar(root):
     """UT-HAR: .npy stored as .csv. X (N,250,90)=time x (3ant*30sub); needs
     TRANSPOSE -> (N,90,250) feature-major. 7 classes. Official train/val/test;
     per user decision val is MERGED INTO TEST (train=3977, test=500+496=996)."""
-    base = DATA_ROOT / 'UT_HAR'
-    def ld(name, sub):
-        return np.load(base / sub / f'{name}.csv', allow_pickle=True)
-    Xtr = ld('X_train', 'data').astype(np.float32).transpose(0, 2, 1)   # (3977,90,250)
-    Xte = ld('X_test',  'data').astype(np.float32).transpose(0, 2, 1)   # (500,90,250)
-    Xva = ld('X_val',   'data').astype(np.float32).transpose(0, 2, 1)   # (496,90,250)
-    ytr = ld('y_train', 'label').astype(np.int64)
-    yte = ld('y_test',  'label').astype(np.int64)
-    yva = ld('y_val',   'label').astype(np.int64)
+    def ld(name):
+        return np.load(_find(root, f'{name}.csv'), allow_pickle=True)
+    Xtr = ld('X_train').astype(np.float32).transpose(0, 2, 1)   # (3977,90,250)
+    Xte = ld('X_test').astype(np.float32).transpose(0, 2, 1)    # (500,90,250)
+    Xva = ld('X_val').astype(np.float32).transpose(0, 2, 1)     # (496,90,250)
+    ytr = ld('y_train').astype(np.int64)
+    yte = ld('y_test').astype(np.int64)
+    yva = ld('y_val').astype(np.int64)
     X = np.concatenate([Xtr, Xte, Xva], axis=0)
     y = np.concatenate([ytr, yte, yva], axis=0)
     n_tr, n_te = len(Xtr), len(Xte) + len(Xva)        # val folded into test
@@ -72,7 +84,7 @@ def load_uthar():
     return X, y, splits
 
 
-def load_ntufi():
+def load_ntufi(root):
     """NTU-Fi: per-class folders of .mat, key 'CSIamp' (342,2000)=(3ant*114sub) x time.
     Already feature-major (no transpose). Official train_amp/test_amp folders.
 
@@ -81,14 +93,15 @@ def load_ntufi():
     500 packets @ 500Hz over 1s, so DATASETS['ntufi']['fs']=500 for the proc LPF."""
     import os
     import scipy.io
-    base = DATA_ROOT / 'NTU-Fi_HAR'
-    classes = sorted(os.listdir(base / 'train_amp'))   # box,circle,clean,fall,run,walk
+    train_dir = _find(root, 'train_amp')
+    test_dir  = _find(root, 'test_amp')
+    classes = sorted(os.listdir(train_dir))   # box,circle,clean,fall,run,walk
     cls2idx = {c: i for i, c in enumerate(classes)}
     Xs, ys, split_idx = [], [], {'train': [], 'test': []}
     k = 0
-    for split, folder in [('train', 'train_amp'), ('test', 'test_amp')]:
+    for split, folder in [('train', train_dir), ('test', test_dir)]:
         for c in classes:
-            cdir = base / folder / c
+            cdir = Path(folder) / c
             for fn in sorted(os.listdir(cdir)):
                 if not fn.endswith('.mat'):
                     continue
@@ -128,13 +141,22 @@ SPLIT_DESC = {
 }
 
 
-def build(dataset: str, mode: str):
+DIRMAP = {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}
+
+
+def build(dataset: str, mode: str, raw_root=None, out_root=None):
+    """raw_root: where the raw dataset lives (default local dataset/<DIR>; on Kaggle
+    pass the mounted dataset path). out_root: where bench/ is written (default local
+    dataset/<DIR>; on Kaggle pass e.g. /kaggle/working)."""
     cfg = DATASETS[dataset]
     do_filter = (mode == 'proc')
     n_ant, sub, n_per_sub, fs = cfg['n_ant'], cfg['sub'], cfg['n_per_sub'], cfg['fs']
 
-    print(f'Loading {dataset} ...')
-    X, y, splits = cfg['loader']()
+    raw_root = Path(raw_root) if raw_root else DATA_ROOT / DIRMAP[dataset]
+    base_out = Path(out_root) / DIRMAP[dataset] if out_root else DATA_ROOT / DIRMAP[dataset]
+
+    print(f'Loading {dataset} from {raw_root} ...')
+    X, y, splits = cfg['loader'](raw_root)
     N, AxS, time = X.shape
     assert AxS == n_ant * sub, f'axis1 {AxS} != n_ant*sub {n_ant*sub}'
     C = 3 * n_per_sub
@@ -143,7 +165,7 @@ def build(dataset: str, mode: str):
     print(f'  mode={mode}  do_filter={do_filter}  fs={fs}')
     print(f'  split: ' + '  '.join(f'{k}={len(v)}' for k, v in splits.items()))
 
-    out_dir = DATA_ROOT / {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}[dataset] / 'bench' / mode
+    out_dir = base_out / 'bench' / mode
     wav_dir = out_dir / 'wavmamba'           # PreprocWavMambaDataset reads wavmamba/X_*.npy
     wav_dir.mkdir(parents=True, exist_ok=True)
 
@@ -199,5 +221,9 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--dataset', required=True, choices=list(DATASETS))
     ap.add_argument('--mode', required=True, choices=['raw', 'proc'])
+    ap.add_argument('--raw-root', default=None,
+                    help='Raw dataset root (default local dataset/<DIR>; on Kaggle: mount path)')
+    ap.add_argument('--out-root', default=None,
+                    help='Where bench/ is written (default local dataset/<DIR>; on Kaggle: /kaggle/working)')
     args = ap.parse_args()
-    build(args.dataset, args.mode)
+    build(args.dataset, args.mode, raw_root=args.raw_root, out_root=args.out_root)

@@ -1,8 +1,9 @@
 """Generate xrf55_bench/notebooks/s41_multidataset.ipynb (nbformat v4).
 
 S4.1 (WavDualMamba on Haar-3 LL|HL|LH + AttnStatPool) applied to HUST / UT-HAR /
-NTU-Fi. Parameterised by DATASET + MODE; everything else is read from the
-self-describing stats.json built by 10_build_multi.py.
+NTU-Fi. Parameterised by DATASET + MODE. Builds the packed Haar-3 bench IN-NOTEBOOK
+from the mounted RAW Kaggle datasets (hust_dataset / ut_har_dataset / ntu_fi_dataset),
+then trains. Everything dataset-specific is read from the self-describing stats.json.
 """
 import json
 from pathlib import Path
@@ -29,28 +30,29 @@ cells = []
 cells.append(md(
     "# S4.1 Multi-dataset — WavDualMamba (Haar-3 LL|HL|LH + AttnStatPool)",
     "",
-    "Áp dụng mô hình tốt nhất **S4.1** (đạt 93.99% trên XRF55) cho **HUST / UT-HAR / NTU-Fi**.",
-    "Chọn `DATASET` + `MODE` ở Cell 3; mọi cấu hình còn lại đọc tự động từ `stats.json`.",
+    "Áp dụng mô hình tốt nhất **S4.1** (93.99% trên XRF55) cho **HUST / UT-HAR / NTU-Fi**.",
+    "Chọn `DATASET` + `MODE` ở Cell 3; notebook **build packed Haar-3 ngay trong notebook** từ",
+    "dataset RAW đã mount, rồi train. Cấu hình dataset đọc tự động từ `stats.json`.",
     "",
-    "| Dataset | classes | packed (C,T2,F2) | fs | split |",
-    "|---|---|---|---|---|",
-    "| HUST | 6 | (27,500,15) | 200 | random 80/20 seed 42 |",
-    "| UT-HAR | 7 | (9,125,15) | 100 | official train; test=test+val |",
-    "| NTU-Fi | 6 | (9,250,57) | 500 (::4) | official train/test |",
+    "| Dataset | classes | packed (C,T2,F2) | split |",
+    "|---|---|---|---|",
+    "| HUST | 6 | (27,500,15) | random 80/20 seed 42 |",
+    "| UT-HAR | 7 | (9,125,15) | official train; test=test+val |",
+    "| NTU-Fi | 6 | (9,250,57) | official train/test (::4) |",
     "",
-    "**Protocol** = giống S4.1 ablation: AdamW lr 5e-4→1e-6, warmup+cosine, "
-    "betas (0.9,0.95), grad_clip 1.0, 80 epochs, eval = last_model.",
+    "**Protocol** = giống S4.1: AdamW lr 5e-4→1e-6 warmup+cosine, betas (0.9,0.95), "
+    "grad_clip 1.0, eval=last_model. **raw** = chỉ Haar (không lọc); **proc** = +Hampel+LPF.",
     "",
-    "Tiền xử lý (Hampel+LPF theo fs + Haar-3 + z-score per channel,bin all-reps) "
-    "đã build sẵn & verify ở local bằng `10_build_multi.py`.",
+    "**Cần attach 3 Kaggle dataset RAW:** `hust_dataset`, `ut_har_dataset`, `ntu_fi_dataset`.",
 ))
 
 cells.append(code(
-    "# Cell 1 — Install mamba-ssm (required by WavDualMamba BiMamba layers)",
+    "# Cell 1 — Install mamba-ssm (WavDualMamba) + PyWavelets (build Haar)",
     "!pip install -q ninja packaging wheel",
     "!pip install -q triton",
     "!pip install -q causal-conv1d>=1.2.0 --no-build-isolation",
     "!pip install -q mamba-ssm --no-build-isolation",
+    "!pip install -q PyWavelets",
     "print('Install done')",
 ))
 
@@ -73,22 +75,47 @@ cells.append(code(
 ))
 
 cells.append(code(
-    "# Cell 3 — Configuration (chọn DATASET + MODE; phần còn lại đọc từ stats.json)",
-    "import json",
+    "# Cell 3 — Configuration",
     "from pathlib import Path",
     "",
     "DATASET = 'hust'      # 'hust' | 'uthar' | 'ntufi'",
-    "MODE    = 'proc'      # 'proc' | 'raw'",
+    "MODE    = 'raw'       # 'raw' (chỉ Haar, trung thành benchmark) | 'proc' (+Hampel+LPF)",
     "SEEDS   = [0, 4, 8, 17, 42]   # S4.1 = 5 seeds; dùng [0,4,8] nếu muốn gọn compute",
-    "NUM_EPOCHS = 80       # S4.1 = 80ep  (NTU-Fi nhỏ → giảm 60 nếu thấy overfit)",
+    "NUM_EPOCHS = 80      # đồng nhất 80 epoch cho cả 3 dataset (giống protocol S4.1)",
     "",
-    "# Mount path của packed bench đã build & upload lên Kaggle.",
-    "# Cấu trúc kỳ vọng: <DATA_ROOT>/<DIR>/bench/<mode>/{wavmamba/X_*.npy, y_*.npy, stats.json}",
+    "# Mount path của 3 dataset RAW đã attach — CHỈNH cho khớp slug thực tế",
+    "# (xem panel Add Input bên phải Kaggle để lấy đúng đường dẫn /kaggle/input/<slug>).",
+    "RAW_MOUNTS = {",
+    "    'hust':  '/kaggle/input/hust_dataset',",
+    "    'uthar': '/kaggle/input/ut_har_dataset',",
+    "    'ntufi': '/kaggle/input/ntu_fi_dataset',",
+    "}",
     "DIRMAP    = {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}",
-    "DATA_ROOT = Path('/kaggle/input/datasets/imhoangt/s41-multidata')   # <- chỉnh theo dataset bạn upload",
-    "BENCH_DIR = DATA_ROOT / DIRMAP[DATASET] / 'bench' / MODE",
-    "",
-    "# Đọc cấu hình tự-mô-tả từ stats.json (dataset/classes/class_names/split/dims/fs).",
+    "OUT_ROOT  = '/kaggle/working'                 # bench/ sẽ được build vào đây",
+    "BENCH_DIR = Path(OUT_ROOT) / DIRMAP[DATASET] / 'bench' / MODE",
+    "OUTPUT_DIR = Path(f'/kaggle/working/outputs/s41_{DATASET}_{MODE}_p02')",
+    "print(f'DATASET={DATASET}  MODE={MODE}  SEEDS={SEEDS}  EPOCHS={NUM_EPOCHS}')",
+    "print(f'RAW mount : {RAW_MOUNTS[DATASET]}  (exists={Path(RAW_MOUNTS[DATASET]).exists()})')",
+    "print(f'BENCH_DIR : {BENCH_DIR}')",
+))
+
+cells.append(code(
+    "# Cell 4 — BUILD packed Haar-3 bench in-notebook (raw/proc) from the mounted RAW dataset",
+    "import subprocess, sys",
+    "build_py = CODE_PATH / 'xrf55_bench' / 'scripts' / '10_build_multi.py'",
+    "cmd = [sys.executable, str(build_py), '--dataset', DATASET, '--mode', MODE,",
+    "       '--raw-root', RAW_MOUNTS[DATASET], '--out-root', OUT_ROOT]",
+    "print('Running:', ' '.join(cmd))",
+    "subprocess.run(cmd, check=True)",
+    "for f in ['stats.json', 'y_train.npy', 'y_test.npy',",
+    "          'wavmamba/X_train.npy', 'wavmamba/X_test.npy']:",
+    "    p = BENCH_DIR / f",
+    "    print(f'  [{\"OK\" if p.exists() else \"MISSING\"}] {p}')",
+))
+
+cells.append(code(
+    "# Cell 5 — Read self-describing config from the freshly built stats.json",
+    "import json",
     "meta        = json.load(open(BENCH_DIR / 'stats.json'))['meta']",
     "NUM_CLASSES = meta['classes']",
     "CLASS_NAMES = meta['class_names']",
@@ -96,42 +123,17 @@ cells.append(code(
     "C, T2, F2   = 3 * meta['n_per_sub'], meta['T2'], meta['F2']",
     "MODEL_KWARGS = {'n_links': 1, 'n_antennas': meta['n_per_sub'], 'f2': F2,",
     "                'subbands': ('LL', 'HL', 'LH'), 'pool': 'attnstat'}",
-    "OUTPUT_DIR  = Path(f'/kaggle/working/outputs/s41_{DATASET}_{MODE}_p02')",
-    "",
-    "print(f'Dataset    : {DATASET} ({meta[\"dataset\"]})  mode={MODE}  fs={meta[\"fs\"]}')",
-    "print(f'Classes    : {NUM_CLASSES}  {CLASS_NAMES}')",
-    "print(f'Split      : {SPLIT_DESC}')",
-    "print(f'Packed dims: C={C}  T2={T2}  F2={F2}')",
-    "print(f'Model kwargs: {MODEL_KWARGS}')",
-    "print(f'Seeds={SEEDS}  epochs={NUM_EPOCHS}')",
-    "print(f'Output dir : {OUTPUT_DIR}')",
-    "for f in ['stats.json', 'y_train.npy', 'y_test.npy',",
-    "          'wavmamba/X_train.npy', 'wavmamba/X_test.npy']:",
-    "    p = BENCH_DIR / f",
-    "    print(f'  [{\"OK\" if p.exists() else \"MISSING\"}] {p}')",
-))
-
-cells.append(md(
-    "### (Tùy chọn) Build trong notebook từ raw",
-    "Chỉ dùng nếu bạn upload **raw** thay vì packed bench. Cần `PyWavelets` và đặt raw "
-    "đúng `dataset/<DIR>/` trong repo. Mặc định dùng packed đã upload ở Cell 3 (khuyến nghị — "
-    "đã verify ở local).",
+    "print(f'dataset={meta[\"dataset\"]} mode={meta[\"mode\"]} fs={meta[\"fs\"]} source={meta[\"source\"]}')",
+    "print(f'classes={NUM_CLASSES}  {CLASS_NAMES}')",
+    "print(f'split={SPLIT_DESC}')",
+    "print(f'packed dims: C={C} T2={T2} F2={F2}   model_kwargs={MODEL_KWARGS}')",
+    "print(f'seeds={SEEDS} epochs={NUM_EPOCHS} out={OUTPUT_DIR}')",
 ))
 
 cells.append(code(
-    "# Cell 3b (TÙY CHỌN) — build packed bench từ raw trong notebook",
-    "# !pip install -q PyWavelets",
-    "# import subprocess, sys",
-    "# subprocess.run([sys.executable, str(CODE_PATH / 'xrf55_bench/scripts/10_build_multi.py'),",
-    "#                 '--dataset', DATASET, '--mode', MODE], check=True)",
-    "# BENCH_DIR = CODE_PATH / 'dataset' / DIRMAP[DATASET] / 'bench' / MODE  # rồi chạy lại Cell 3 phần đọc meta",
-))
-
-cells.append(code(
-    "# Cell 4 — Smoke-build + forward (kiểm Mamba/GPU + dims TRƯỚC khi train dài)",
+    "# Cell 6 — Smoke-build + forward (kiểm Mamba/GPU + dims TRƯỚC khi train dài)",
     "import torch, gc",
     "from xrf55_bench.models.wavdualmamba.model import WavDualMamba",
-    "",
     "dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')",
     "_m  = WavDualMamba(num_classes=NUM_CLASSES, **MODEL_KWARGS).to(dev)",
     "_x  = torch.randn(2, C, T2, F2, device=dev)",
@@ -148,13 +150,11 @@ cells.append(code(
 ))
 
 cells.append(code(
-    "# Cell 5 — Train S4.1 (protocol giống ablation: 02, 80ep, betas 0.9/0.95, gc=1, lr 5e-4->1e-6)",
+    "# Cell 7 — Train S4.1 (protocol giống ablation: 02, betas 0.9/0.95, gc=1, lr 5e-4->1e-6)",
     "from xrf55_bench.config import TrainCfg_for_protocol",
-    "",
     "cfg = TrainCfg_for_protocol('02', seeds=tuple(SEEDS), num_epochs=NUM_EPOCHS,",
     "                            betas=(0.9, 0.95), grad_clip=1.0,",
     "                            lr=5e-4, floor_lr=1e-6)",
-    "",
     "run(model_name='wavdualmamba', bench_dir=BENCH_DIR, output_dir=OUTPUT_DIR,",
     "    train_cfg=cfg, num_workers=4, model_kwargs=MODEL_KWARGS,",
     "    num_classes=NUM_CLASSES, class_names=CLASS_NAMES,",
@@ -162,7 +162,7 @@ cells.append(code(
 ))
 
 cells.append(code(
-    "# Cell 6 — Results",
+    "# Cell 8 — Results",
     "import json",
     "mp = OUTPUT_DIR / 'metrics.json'",
     "if mp.exists():",
@@ -187,15 +187,13 @@ cells.append(code(
 ))
 
 cells.append(code(
-    "# Cell 7 — Plots + Download zip",
+    "# Cell 9 — Plots + Download zip",
     "import shutil",
     "from IPython.display import Image, display, FileLink",
-    "",
     "for fname in ['training_curve.png', 'confusion_matrix.png', 'seed_comparison.png']:",
     "    p = OUTPUT_DIR / 'plots' / fname",
     "    if p.exists():",
     "        display(Image(str(p)))",
-    "",
     "print('\\n--- Download ---')",
     "zips = sorted(OUTPUT_DIR.glob('*.zip'))",
     "for src in zips:",
@@ -204,7 +202,7 @@ cells.append(code(
     "    print(f'{src.name}  ({dst.stat().st_size/1e6:.1f} MB)')",
     "    display(FileLink(src.name))",
     "if not zips:",
-    "    print('[MISSING] no zip — run Cell 5 first.')",
+    "    print('[MISSING] no zip — run Cell 7 first.')",
 ))
 
 nb = {
