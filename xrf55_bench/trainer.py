@@ -105,17 +105,22 @@ def _get_model_cfg(model_name: str, model_kwargs: dict = None,
         )
     if model_name == 'tfmamba':
         from xrf55_bench.models.tf_mamba.model import TFMamba
+        # num_features (= n_per_sub*f2) and max_len (= T2) differ per dataset;
+        # pop from model_kwargs (defaults = XRF55 dims) so other flags still spread.
+        mk = dict(model_kwargs)
+        nf = mk.pop('num_features', 135)
+        ml = mk.pop('max_len', 500)
         return dict(
             factory      = lambda: TFMamba(
-                num_features=135, d_model=64, num_layers=3,
-                num_classes=num_classes, max_len=500, **model_kwargs,
+                num_features=nf, d_model=64, num_layers=3,
+                num_classes=num_classes, max_len=ml, **mk,
             ),
             title        = 'TF-Mamba',
             is_2stream   = True,
             eval_fn      = evaluate,
             eval_full_fn = evaluate_full,
-            input_shape  = ((500, 135), (500, 135)),
-            meas_fn      = lambda m, d: measure_efficiency(m, d, ((500, 135), (500, 135))),
+            input_shape  = ((ml, nf), (ml, nf)),
+            meas_fn      = lambda m, d: measure_efficiency(m, d, ((ml, nf), (ml, nf))),
         )
     if model_name == 'wavdualmamba':
         from xrf55_bench.models.wavdualmamba.model import WavDualMamba
@@ -462,6 +467,13 @@ def main(model_name: str, output_dir,
 
                 # Overwrite every epoch — last_model.pt always = last completed epoch
                 torch.save(model.state_dict(), seed_dir / 'last_model.pt')
+
+                # Early stop on train loss (TF-Mamba protocol). last_model = the
+                # converged model at the stop epoch (reported as headline).
+                if cfg.early_stop_loss is not None and avg_loss <= cfg.early_stop_loss:
+                    print(f'  early stop @ epoch {epoch}: train loss '
+                          f'{avg_loss:.4f} <= {cfg.early_stop_loss}')
+                    break
 
         except KeyboardInterrupt:
             _interrupted = True

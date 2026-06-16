@@ -26,7 +26,9 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from xrf55_bench.preprocessing.multi_dataset import pack_haar3
+from xrf55_bench.preprocessing.multi_dataset import (
+    pack_haar3, haar3_subbands, to_maps,
+)
 
 DATA_ROOT = PROJECT_ROOT / 'dataset'
 SPLIT_SEED = 42   # fixed 80/20 split, reproducible across the 5 model-init seeds
@@ -159,13 +161,22 @@ SPLIT_DESC = {
 DIRMAP = {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}
 
 
-def build(dataset: str, mode: str, raw_root=None, out_root=None):
+def _finalize(s, s2, n):
+    """all-reps mean/std from running sums; std floored at 1e-6."""
+    mean = s / n
+    std = np.maximum(np.sqrt(np.maximum(s2 / n - mean * mean, 0.0)), 1e-6)
+    return mean.astype(np.float32).tolist(), std.astype(np.float32).tolist()
+
+
+def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba'):
     """raw_root: where the raw dataset lives (default local dataset/<DIR>; on Kaggle
-    pass the mounted dataset path). out_root: where bench/ is written (default local
-    dataset/<DIR>; on Kaggle pass e.g. /kaggle/working)."""
+    pass the mounted dataset path). out_root: where bench/ is written.
+    fmt: 'wavmamba' (S4.1 packed [LL|HL|LH]) | 'tfmamba' (2-stream xh=HL, xv=LH
+    flat, for the original TF-Mamba) | 'both'. Haar is computed once either way."""
     cfg = DATASETS[dataset]
     do_filter = (mode == 'proc')
     n_ant, sub, n_per_sub, fs = cfg['n_ant'], cfg['sub'], cfg['n_per_sub'], cfg['fs']
+    do_wav, do_tf = fmt in ('wavmamba', 'both'), fmt in ('tfmamba', 'both')
 
     raw_root = Path(raw_root) if raw_root else DATA_ROOT / DIRMAP[dataset]
     base_out = Path(out_root) / DIRMAP[dataset] if out_root else DATA_ROOT / DIRMAP[dataset]
@@ -174,62 +185,71 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None):
     X, y, splits = cfg['loader'](raw_root)
     N, AxS, time = X.shape
     assert AxS == n_ant * sub, f'axis1 {AxS} != n_ant*sub {n_ant*sub}'
-    C = 3 * n_per_sub
-    T2, F2 = time // 2, sub // 2
-    print(f'  N={N}  raw=({AxS},{time})  -> packed=({C},{T2},{F2})  classes={cfg["classes"]}')
-    print(f'  mode={mode}  do_filter={do_filter}  fs={fs}')
+    C, T2, F2 = 3 * n_per_sub, time // 2, sub // 2
+    M = n_per_sub * F2                      # tfmamba flat feature dim (= n_ant*sub//2)
+    print(f'  N={N}  raw=({AxS},{time})  fmt={fmt}  -> wav=({C},{T2},{F2}) / tf xh,xv=({T2},{M})')
+    print(f'  mode={mode}  do_filter={do_filter}  fs={fs}  classes={cfg["classes"]}')
     print(f'  split: ' + '  '.join(f'{k}={len(v)}' for k, v in splits.items()))
 
     out_dir = base_out / 'bench' / mode
-    wav_dir = out_dir / 'wavmamba'           # PreprocWavMambaDataset reads wavmamba/X_*.npy
-    wav_dir.mkdir(parents=True, exist_ok=True)
-
-    # memmaps per split + all-reps stat accumulators (per channel,bin over time+samples)
-    mm = {}
+    out_dir.mkdir(parents=True, exist_ok=True)
     for sp, idx in splits.items():
-        mm[sp] = np.lib.format.open_memmap(
-            str(wav_dir / f'X_{sp}.npy'), mode='w+', dtype=np.float32,
-            shape=(len(idx), C, T2, F2))
         np.save(out_dir / f'y_{sp}.npy', y[idx].astype(np.int64))
 
-    s  = np.zeros((C, F2), dtype=np.float64)
-    s2 = np.zeros((C, F2), dtype=np.float64)
-    n_acc = np.int64(0)
+    mm = xh_mm = xv_mm = None
+    if do_wav:
+        (out_dir / 'wavmamba').mkdir(exist_ok=True)
+        mm = {sp: np.lib.format.open_memmap(str(out_dir / 'wavmamba' / f'X_{sp}.npy'),
+              mode='w+', dtype=np.float32, shape=(len(idx), C, T2, F2))
+              for sp, idx in splits.items()}
+        s = np.zeros((C, F2)); s2 = np.zeros((C, F2)); n_wav = np.int64(0)
+    if do_tf:
+        (out_dir / 'tfmamba').mkdir(exist_ok=True)
+        xh_mm = {sp: np.lib.format.open_memmap(str(out_dir / 'tfmamba' / f'X_{sp}_xh.npy'),
+                 mode='w+', dtype=np.float32, shape=(len(idx), T2, M)) for sp, idx in splits.items()}
+        xv_mm = {sp: np.lib.format.open_memmap(str(out_dir / 'tfmamba' / f'X_{sp}_xv.npy'),
+                 mode='w+', dtype=np.float32, shape=(len(idx), T2, M)) for sp, idx in splits.items()}
+        hs = np.zeros(M); hs2 = np.zeros(M); vs = np.zeros(M); vs2 = np.zeros(M); n_tf = np.int64(0)
 
     for sp, idx in splits.items():
-        for j, i in enumerate(tqdm(idx, desc=f'  [{sp}] pack', unit='smp')):
-            x = pack_haar3(X[i], n_ant, sub, n_per_sub, fs=fs, do_filter=do_filter)  # (C,T2,F2)
-            mm[sp][j] = x
-            xd = x.astype(np.float64)
-            s  += xd.sum(axis=1)              # sum over time -> (C,F2)
-            s2 += (xd * xd).sum(axis=1)
-            n_acc += T2
+        for j, i in enumerate(tqdm(idx, desc=f'  [{sp}] {fmt}', unit='smp')):
+            LL, HL, LH = haar3_subbands(X[i], n_ant, sub, fs=fs, do_filter=do_filter)  # each (T2,M)
+            if do_wav:
+                x = np.concatenate([to_maps(LL, n_per_sub), to_maps(HL, n_per_sub),
+                                    to_maps(LH, n_per_sub)], axis=0).astype(np.float32, copy=False)
+                mm[sp][j] = x
+                xd = x.astype(np.float64); s += xd.sum(1); s2 += (xd * xd).sum(1); n_wav += T2
+            if do_tf:
+                xh_mm[sp][j] = HL; xv_mm[sp][j] = LH
+                hd = HL.astype(np.float64); vd = LH.astype(np.float64)
+                hs += hd.sum(0); hs2 += (hd * hd).sum(0)
+                vs += vd.sum(0); vs2 += (vd * vd).sum(0); n_tf += T2
 
-    mean = s / n_acc
-    std  = np.maximum(np.sqrt(np.maximum(s2 / n_acc - mean * mean, 0.0)), 1e-6)
     meta = dict(dataset=dataset, mode=mode, fs=fs, do_filter=do_filter,
-                n_ant=n_ant, sub=sub, n_per_sub=n_per_sub, C=C, T2=T2, F2=F2,
+                n_ant=n_ant, sub=sub, n_per_sub=n_per_sub, C=C, T2=T2, F2=F2, M=M,
                 classes=cfg['classes'], class_names=CLASS_NAMES[dataset],
                 split_seed=SPLIT_SEED, split=SPLIT_DESC[dataset],
-                subband_order='LL|HL|LH', norm='all-reps per (channel,bin)',
-                # source string drives infer_data_mode() in dataset.py:
+                subband_order='LL|HL|LH', norm='all-reps',
                 source=('multi_hampel_lpf' if do_filter else 'multi_raw'))
     if do_filter:
         meta['filter'] = dict(hampel_window=8, hampel_nsigma=3.0,
                               lpf_order=4, lpf_cutoff_hz=20.0)
-    stats = {
-        # nested under 'wavmamba' so PreprocWavMambaDataset picks it up directly.
-        'wavmamba': {
-            'mean': mean.astype(np.float32).tolist(),     # (C, F2)
-            'std':  std.astype(np.float32).tolist(),
-        },
-        'meta': meta,
-    }
+    stats = {'meta': meta}
+    if do_wav:
+        mean, std = _finalize(s, s2, n_wav)            # (C,F2) per channel,bin
+        stats['wavmamba'] = {'mean': mean, 'std': std}
+    if do_tf:
+        xh_m, xh_s = _finalize(hs, hs2, n_tf)          # (M,) per feature
+        xv_m, xv_s = _finalize(vs, vs2, n_tf)
+        stats['tfmamba'] = {'xh_mean': xh_m, 'xh_std': xh_s, 'xv_mean': xv_m, 'xv_std': xv_s}
+        meta['tfmamba_subband_naming'] = 'paper-eq5'   # xh file holds HL content
     with open(out_dir / 'stats.json', 'w') as f:
         json.dump(stats, f)
-    for sp in splits:
-        del mm[sp]
-    print(f'  saved -> {out_dir}  (wavmamba/X_*, y_*, stats.json)  un-normalized')
+    for d in (mm, xh_mm, xv_mm):
+        if d:
+            for sp in list(d):
+                del d[sp]
+    print(f'  saved -> {out_dir}  (fmt={fmt}, y_*, stats.json)  un-normalized')
 
 
 if __name__ == '__main__':
@@ -240,5 +260,7 @@ if __name__ == '__main__':
                     help='Raw dataset root (default local dataset/<DIR>; on Kaggle: mount path)')
     ap.add_argument('--out-root', default=None,
                     help='Where bench/ is written (default local dataset/<DIR>; on Kaggle: /kaggle/working)')
+    ap.add_argument('--format', default='wavmamba', choices=['wavmamba', 'tfmamba', 'both'],
+                    help='wavmamba=S4.1 packed | tfmamba=2-stream xh/xv | both')
     args = ap.parse_args()
-    build(args.dataset, args.mode, raw_root=args.raw_root, out_root=args.out_root)
+    build(args.dataset, args.mode, raw_root=args.raw_root, out_root=args.out_root, fmt=args.format)

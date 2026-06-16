@@ -1,9 +1,12 @@
 """Generate xrf55_bench/notebooks/s41_multidataset.ipynb (nbformat v4).
 
-S4.1 (WavDualMamba on Haar-3 LL|HL|LH + AttnStatPool) applied to HUST / UT-HAR /
-NTU-Fi, in ONE run. Builds the packed Haar-3 bench in-notebook from the mounted
-RAW Kaggle datasets, then trains each (sweep loop, like the xrf55_bench notebooks).
-Everything dataset-specific is read from the self-describing stats.json.
+Applies a chosen MODEL (TF-Mamba original | S4.1 WavDualMamba) under a chosen
+PROTOCOL (theirs = TF-Mamba paper | mine = 02*) to HUST / UT-HAR / NTU-Fi, in one
+run. Builds the matching packed bench in-notebook from the mounted RAW Kaggle
+datasets, then sweeps DATASETS x MODES. Dataset-specifics read from stats.json.
+
+MODEL='tfmamba' + PROTOCOL='theirs' reproduces the TF-Mamba paper numbers
+(validation that the original algorithm runs correctly).
 """
 import json
 from pathlib import Path
@@ -28,27 +31,30 @@ def _src(lines):
 cells = []
 
 cells.append(md(
-    "# S4.1 Multi-dataset — WavDualMamba (Haar-3 LL|HL|LH + AttnStatPool)",
+    "# Multi-dataset — TF-Mamba (gốc) / S4.1 WavDualMamba on HUST / UT-HAR / NTU-Fi",
     "",
-    "Áp dụng mô hình tốt nhất **S4.1** (93.99% trên XRF55) cho **HUST / UT-HAR / NTU-Fi** "
-    "trong **một lần chạy**. Notebook build packed Haar-3 ngay trong notebook từ dataset RAW "
-    "đã mount, rồi train lần lượt (sweep), mỗi dataset 1 zip riêng.",
+    "Chọn **MODEL** + **PROTOCOL** ở Cell 3, chạy 1 lần cho cả 3 dataset (sweep).",
+    "Notebook build packed bench ngay trong notebook từ dataset RAW đã mount.",
     "",
-    "| Dataset | classes | packed (C,T2,F2) | split |",
-    "|---|---|---|---|",
-    "| HUST | 6 | (27,500,15) | random 80/20 seed 42 |",
-    "| UT-HAR | 7 | (9,125,15) | official train; test=test+val |",
-    "| NTU-Fi | 6 | (9,250,57) | official train/test (::4) |",
+    "| MODEL | Mô tả |",
+    "|---|---|",
+    "| `tfmamba` | **TF-Mamba gốc** (paper Liu 2025): Linear embed+PE, uni-Mamba×3, AdaptiveFusion, proj_s3, GAP |",
+    "| `s41` | WavDualMamba Haar-3 {LL,HL,LH} + AttnStatPool (mô hình tốt nhất của ta) |",
     "",
-    "**Protocol** = S4.1: AdamW lr 5e-4→1e-6 warmup+cosine, betas (0.9,0.95), grad_clip 1.0, "
-    "80 epoch, eval=last_model. **raw**=chỉ Haar (trung thành benchmark); **proc**=+Hampel+LPF.",
+    "| PROTOCOL | optimizer | lr | epochs | eval |",
+    "|---|---|---|---|---|",
+    "| `theirs` | AdamW (wd=0) | 1e-4 hằng số | 40 + early-stop(loss≤0.01) | last (lúc dừng) |",
+    "| `mine` | AdamW (wd=1e-3) | 5e-4→1e-6 warmup+cosine | 80 | last_model |",
     "",
-    "**Trước khi chạy:** Add Input cả 3 dataset RAW (`hust_dataset`, `ut_har_dataset`, "
-    "`ntu_fi_dataset`) + bật **GPU**. ~2.5h cho cả 3 raw (≈7s/epoch).",
+    "**`tfmamba` + `theirs` = tái lập paper** (UT-HAR 99.00 / NTU-Fi 98.86 / HUST 99.72) "
+    "→ chứng minh chạy đúng thuật toán gốc.",
+    "",
+    "**Trước khi chạy:** Add Input 3 dataset RAW (`hust_dataset`, `ut_har_dataset`, "
+    "`ntu_fi_dataset`) + bật **GPU**.",
 ))
 
 cells.append(code(
-    "# Cell 1 — Install mamba-ssm (WavDualMamba) + PyWavelets (build Haar)",
+    "# Cell 1 — Install mamba-ssm + PyWavelets",
     "!pip install -q ninja packaging wheel",
     "!pip install -q triton",
     "!pip install -q causal-conv1d>=1.2.0 --no-build-isolation",
@@ -76,69 +82,87 @@ cells.append(code(
 ))
 
 cells.append(code(
-    "# Cell 3 — Configuration (chạy cả 3 dataset trong 1 lần)",
+    "# Cell 3 — Configuration",
     "from pathlib import Path",
     "",
-    "DATASETS   = ['hust', 'uthar', 'ntufi']   # bỏ bớt nếu chỉ muốn 1-2 cái",
-    "MODES      = ['raw']    # ['raw'] | ['proc'] | ['raw','proc'] (chạy cả 2 loại 1 lần)",
-    "SEEDS      = [0, 4, 8, 17, 42]            # S4.1 = 5 seeds; [0,4,8] nếu muốn gọn",
-    "NUM_EPOCHS = 80                           # đồng nhất cả 3 (protocol S4.1)",
-    "OUT_ROOT   = '/kaggle/working'            # bench/ + outputs/ build vào đây",
+    "MODEL    = 'tfmamba'   # 'tfmamba' (gốc) | 's41' (WavDualMamba Haar-3)",
+    "PROTOCOL = 'theirs'    # 'theirs' (TF-Mamba paper) | 'mine' (02*)",
+    "DATASETS = ['hust', 'uthar', 'ntufi']",
+    "MODES    = ['raw']     # ['raw'] | ['proc'] | ['raw','proc']",
+    "SEEDS    = [0, 4, 8, 17, 42]",
+    "OUT_ROOT = '/kaggle/working'",
     "",
     "DIRMAP  = {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}",
-    "# marker nhận diện mount của từng dataset trong /kaggle/input/<slug bất kỳ>/",
     "_MARKER = {'hust': 'HUST_HAR_labels.pt', 'uthar': 'X_train.csv', 'ntufi': 'train_amp'}",
+    "FORMAT  = 'tfmamba' if MODEL == 'tfmamba' else 'wavmamba'   # build layout per model",
     "build_py = CODE_PATH / 'xrf55_bench' / 'scripts' / '10_build_multi.py'",
     "",
     "def resolve_mount(ds):",
-    "    \"\"\"Tự dò /kaggle/input/* chứa marker của ds (khỏi đoán slug).\"\"\"",
     "    base = Path('/kaggle/input')",
     "    for c in (sorted(base.iterdir()) if base.is_dir() else []):",
     "        if next(c.rglob(_MARKER[ds]), None) is not None:",
     "            return str(c)",
     "    raise FileNotFoundError(f'Không thấy /kaggle/input/* chứa {_MARKER[ds]} cho {ds}')",
     "",
-    "print(f'DATASETS={DATASETS}  MODES={MODES}  SEEDS={SEEDS}  EPOCHS={NUM_EPOCHS}')",
+    "print(f'MODEL={MODEL}  PROTOCOL={PROTOCOL}  FORMAT={FORMAT}')",
+    "print(f'DATASETS={DATASETS}  MODES={MODES}  SEEDS={SEEDS}')",
     "for ds in DATASETS:",
     "    try:    print(f'  {ds:6s} mount: {resolve_mount(ds)}')",
     "    except Exception as e: print(f'  {ds:6s} !! {e}')",
 ))
 
 cells.append(code(
-    "# Cell 4 — Smoke 1 lần: chắc mamba_ssm + model chạy được TRƯỚC khi build/train dài",
+    "# Cell 4 — Smoke 1 lần: model đã chọn chạy được trên GPU (fail-fast trước khi build/train)",
     "import torch",
-    "from xrf55_bench.models.wavdualmamba.model import WavDualMamba",
     "dev = 'cuda' if torch.cuda.is_available() else 'cpu'",
-    "_m  = WavDualMamba(num_classes=6, n_links=1, n_antennas=9, f2=15,",
-    "                   subbands=('LL', 'HL', 'LH'), pool='attnstat').to(dev)",
-    "with torch.no_grad():",
-    "    _o = _m(torch.randn(2, 27, 16, 15, device=dev))",
+    "if MODEL == 'tfmamba':",
+    "    from xrf55_bench.models.tf_mamba.model import TFMamba",
+    "    _m = TFMamba(num_features=135, d_model=64, num_layers=3, num_classes=6, max_len=500).to(dev)",
+    "    with torch.no_grad():",
+    "        _o = _m(torch.randn(2, 500, 135, device=dev), torch.randn(2, 500, 135, device=dev))",
+    "else:",
+    "    from xrf55_bench.models.wavdualmamba.model import WavDualMamba",
+    "    _m = WavDualMamba(num_classes=6, n_links=1, n_antennas=9, f2=15,",
+    "                      subbands=('LL', 'HL', 'LH'), pool='attnstat').to(dev)",
+    "    with torch.no_grad():",
+    "        _o = _m(torch.randn(2, 27, 16, 15, device=dev))",
     "assert _o.shape == (2, 6), f'bad output {tuple(_o.shape)}'",
     "del _m, _o",
     "if dev == 'cuda':",
     "    torch.cuda.empty_cache()",
-    "print(f'SMOKE OK ({dev}) — mamba/model chạy được')",
+    "print(f'SMOKE OK ({dev}, {MODEL}) — model chạy được')",
 ))
 
 cells.append(code(
-    "# Cell 5 — Sweep: build + train từng dataset (mỗi cái 1 OUTPUT_DIR / zip riêng)",
+    "# Cell 5 — Sweep: build + train từng dataset (mỗi cái OUTPUT_DIR/zip riêng)",
     "import subprocess, sys, time, json, gc, torch",
     "from xrf55_bench.config import TrainCfg_for_protocol",
+    "",
+    "def make_cfg():",
+    "    if PROTOCOL == 'theirs':   # TF-Mamba paper: AdamW(wd=0) lr1e-4 const, 40ep, early-stop loss<=0.01",
+    "        return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), optimizer='adamw',",
+    "                                     lr=1e-4, weight_decay=0.0, betas=(0.9, 0.999),",
+    "                                     num_epochs=40, scheduler=None, warmup_epochs=0,",
+    "                                     grad_clip=None, early_stop_loss=0.01)",
+    "    return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), num_epochs=80,",
+    "                                 betas=(0.9, 0.95), grad_clip=1.0, lr=5e-4, floor_lr=1e-6)",
+    "",
+    "def model_setup(meta):",
+    "    F2, nps, T2 = meta['F2'], meta['n_per_sub'], meta['T2']",
+    "    if MODEL == 'tfmamba':",
+    "        return 'tfmamba', {'num_features': nps * F2, 'max_len': T2}",
+    "    return 'wavdualmamba', {'n_links': 1, 'n_antennas': nps, 'f2': F2,",
+    "                            'subbands': ('LL', 'HL', 'LH'), 'pool': 'attnstat'}",
     "",
     "def run_one(ds, md):",
     "    raw   = resolve_mount(ds)",
     "    bench = Path(OUT_ROOT) / DIRMAP[ds] / 'bench' / md",
-    "    out   = Path(f'{OUT_ROOT}/outputs/s41_{ds}_{md}_p02')",
-    "    # 1) build packed Haar-3 (raw: chỉ DWT; proc: +Hampel+LPF) -> bench/",
+    "    out   = Path(f'{OUT_ROOT}/outputs/{MODEL}_{ds}_{md}_{PROTOCOL}')",
     "    subprocess.run([sys.executable, str(build_py), '--dataset', ds, '--mode', md,",
-    "                    '--raw-root', raw, '--out-root', OUT_ROOT], check=True)",
+    "                    '--raw-root', raw, '--out-root', OUT_ROOT, '--format', FORMAT], check=True)",
     "    meta = json.load(open(bench / 'stats.json'))['meta']",
-    "    mk = {'n_links': 1, 'n_antennas': meta['n_per_sub'], 'f2': meta['F2'],",
-    "          'subbands': ('LL', 'HL', 'LH'), 'pool': 'attnstat'}",
-    "    # 2) train S4.1 (protocol 02)",
-    "    cfg = TrainCfg_for_protocol('02', seeds=tuple(SEEDS), num_epochs=NUM_EPOCHS,",
-    "                                betas=(0.9, 0.95), grad_clip=1.0, lr=5e-4, floor_lr=1e-6)",
-    "    run(model_name='wavdualmamba', bench_dir=bench, output_dir=out, train_cfg=cfg,",
+    "    mname, mk = model_setup(meta)",
+    "    run(model_name=mname, bench_dir=bench, output_dir=out, train_cfg=make_cfg(),",
     "        num_workers=4, model_kwargs=mk, num_classes=meta['classes'],",
     "        class_names=meta['class_names'], dataset_name=ds, split_desc=meta['split'])",
     "",
@@ -146,13 +170,11 @@ cells.append(code(
     "for ds in DATASETS:",
     "    for md in MODES:",
     "        t0 = time.time()",
-    "        print(f\"\\n{'#'*64}\\n#  {ds} / {md}\\n{'#'*64}\")",
+    "        print(f\"\\n{'#'*64}\\n#  {MODEL} / {ds} / {md} / {PROTOCOL}\\n{'#'*64}\")",
     "        try:",
-    "            run_one(ds, md)",
-    "            results[f'{ds}/{md}'] = 'OK'",
+    "            run_one(ds, md); results[f'{ds}/{md}'] = 'OK'",
     "        except Exception as e:",
-    "            results[f'{ds}/{md}'] = f'FAILED: {type(e).__name__}: {e}'",
-    "            print(f'!! {ds}/{md} FAILED:', e)",
+    "            results[f'{ds}/{md}'] = f'FAILED: {type(e).__name__}: {e}'; print('!!', e)",
     "        gc.collect()",
     "        if torch.cuda.is_available():",
     "            torch.cuda.empty_cache()",
@@ -163,29 +185,25 @@ cells.append(code(
 ))
 
 cells.append(code(
-    "# Cell 6 — Gom tất cả zip + bảng tổng hợp + (tùy) plots dataset cuối",
-    "import shutil, subprocess, sys",
+    "# Cell 6 — Kết quả + gom zip (last_model = headline; best_epoch = chẩn đoán)",
+    "import json, shutil",
     "from pathlib import Path",
-    "from IPython.display import Image, display, FileLink",
+    "from IPython.display import FileLink, display",
     "",
-    "print('--- Zips ---')",
+    "print('--- Results ---')",
+    "for d in sorted(Path('/kaggle/working/outputs').glob(f'{MODEL}_*_{PROTOCOL}')):",
+    "    mp = d / 'metrics.json'",
+    "    if not mp.exists():",
+    "        continue",
+    "    m = json.load(open(mp)); s = m['summary']",
+    "    last = f\"{s['test_accuracy_mean']*100:.2f}±{s['test_accuracy_std']*100:.2f}\"",
+    "    best = f\"{s.get('best_test_acc_mean',0)*100:.2f}±{s.get('best_test_acc_std',0)*100:.2f}\"",
+    "    print(f\"  {d.name:<28} last={last}  best={best}  F1={s['test_f1_macro_mean']*100:.2f}\")",
+    "",
+    "print('\\n--- Zips ---')",
     "for z in sorted(Path('/kaggle/working/outputs').rglob('*.zip')):",
     "    shutil.copy2(z, Path('/kaggle/working') / z.name)",
-    "    print(f'{z.name}  ({z.stat().st_size/1e6:.1f} MB)')",
-    "    display(FileLink(z.name))",
-    "",
-    "print('\\n--- Bảng tổng hợp ---')",
-    "subprocess.run([sys.executable,",
-    "                str(CODE_PATH / 'xrf55_bench/scripts/11_aggregate_multi.py'),",
-    "                '--root', '/kaggle/working/outputs',",
-    "                '--out', '/kaggle/working/summary.md'], check=True)",
-    "print(open('/kaggle/working/summary.md').read())",
-    "",
-    "# (tùy) hiển thị confusion matrix của từng dataset",
-    "for d in sorted(Path('/kaggle/working/outputs').glob('s41_*')):",
-    "    cm = d / 'plots' / 'confusion_matrix.png'",
-    "    if cm.exists():",
-    "        print(d.name); display(Image(str(cm)))",
+    "    print(z.name); display(FileLink(z.name))",
 ))
 
 nb = {

@@ -32,6 +32,10 @@ class TrainCfg:
     criterion:        str            = 'ce'
     label_smoothing:  float          = 0.0
 
+    # Early stop when the epoch's mean TRAIN loss <= this value (None = off).
+    # Used to reproduce the TF-Mamba protocol ("40 epochs, early stopping").
+    early_stop_loss:  Optional[float] = None
+
     # Data mode: 'raw' | 'proc' | None (None = auto-infer from stats.json meta)
     data_mode:        Optional[str]  = None
 
