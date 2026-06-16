@@ -41,18 +41,19 @@ cells.append(md(
     "| `tfmamba` | **TF-Mamba gốc** (paper Liu 2025): Linear embed+PE, uni-Mamba×3, AdaptiveFusion, proj_s3, GAP |",
     "| `s41` | WavDualMamba Haar-3 {LL,HL,LH} + AttnStatPool (mô hình tốt nhất của ta) |",
     "",
-    "| PROTOCOL | optimizer | lr | epochs | eval (so sánh) |",
-    "|---|---|---|---|---|",
-    "| `theirs` | AdamW (wd=0, betas .9/.999, eps 1e-8) | 1e-4 hằng số (no scheduler) | 40 | **best** (= early-stopping giữ checkpoint tốt nhất) |",
-    "| `mine` | AdamW (wd=1e-3) | 5e-4→1e-6 warmup+cosine | 80 | last_model |",
+    "| PROTOCOL | optimizer | lr | wd | epochs | early-stop |",
+    "|---|---|---|---|---|---|",
+    "| `theirs` (= CODE gốc) | AdamW | **1e-3** | 0.01 | 40 | `if loss<0.01: break` |",
+    "| `mine` | AdamW | 5e-4→1e-6 warmup+cosine | 1e-3 | 80 | — |",
     "",
-    "`theirs` khớp **chính xác** mọi tham số paper Mục IV-B nêu (AdamW, lr 1e-4, 40ep, bs 32, "
-    "CE, betas Adam). Paper KHÔNG nêu: weight-decay (→ 0, 'follow Adam'), tiêu chí early-stop "
-    "(→ chạy đủ 40ep, report **best** = early-stopping chuẩn). Model = đúng S0 paper "
-    "(d_model 64, 3 layers, uni-Mamba d_state 16, Linear embed+PE, GAP, proj_s3).",
+    "`theirs` khớp **chính xác code gốc** `Mamba_HUST-HAR.py`: `optim.AdamW(lr=1e-3)` "
+    "(→ wd=0.01 default), `CrossEntropyLoss`, 40 epoch, bs 32, không scheduler, "
+    "early-stop `if average_loss<0.01: break`, random 80/20. **LƯU Ý: paper ghi lr=1e-4 "
+    "nhưng CODE dùng lr=1e-3** → ta theo code (số thực tế tạo kết quả).",
     "",
-    "**`tfmamba` + `theirs` = tái lập paper** (UT-HAR 99.00 / NTU-Fi 98.86 / HUST 99.72) "
-    "→ so cột **best** với paper để chứng minh chạy đúng thuật toán gốc.",
+    "⚠️ **Repo public chỉ có Mamba 1-stream** (`MambaSimple.py`) — KHÔNG phải TF-Mamba "
+    "dual-stream của paper (không DWT/AdaptiveFusion/proj_s3/PE/GAP trong code public). "
+    "`MODEL='tfmamba'` của ta = **kiến trúc paper** (dual-stream, đầy đủ hơn code public).",
     "",
     "**Trước khi chạy:** Add Input 3 dataset RAW (`hust_dataset`, `ut_har_dataset`, "
     "`ntu_fi_dataset`) + bật **GPU**.",
@@ -144,17 +145,17 @@ cells.append(code(
     "from xrf55_bench.config import TrainCfg_for_protocol",
     "",
     "def make_cfg():",
-    "    if PROTOCOL == 'theirs':   # TF-Mamba paper (Sec IV-B) — KHỚP CHÍNH XÁC phần paper nêu:",
-    "        # AdamW, lr=1e-4 hằng số (không scheduler), 40 epochs, bs=32, CE,",
-    "        # betas=(0.9,0.999)+eps=1e-8 (theo Adam paper họ trích). wd=0 (paper không nêu,",
-    "        # 'follow Adam paper' => không weight decay). Early stopping 'when necessary'",
-    "        # KHÔNG có tiêu chí trong paper => chạy đủ 40ep rồi report BEST checkpoint",
-    "        # (đúng nghĩa early-stopping = giữ checkpoint tốt nhất).",
+    "    if PROTOCOL == 'theirs':   # KHỚP CHÍNH XÁC code gốc HUST_HAR (Mamba_HUST-HAR.py):",
+    "        # optim.AdamW(model.parameters(), lr=1e-3)  -> lr=1e-3, wd=0.01 (AdamW default),",
+    "        # betas=(0.9,0.999), eps=1e-8; CrossEntropyLoss; 40 epochs; bs=32; no scheduler;",
+    "        # early stopping: if average_loss < 0.01: break  -> early_stop_loss=0.01.",
+    "        # (LƯU Ý: paper ghi lr=1e-4 nhưng CODE dùng lr=1e-3 — ta theo code vì đó là số",
+    "        #  thực tế tạo ra kết quả; report last_model lúc dừng.)",
     "        return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), optimizer='adamw',",
-    "                                     lr=1e-4, weight_decay=0.0, betas=(0.9, 0.999),",
+    "                                     lr=1e-3, weight_decay=0.01, betas=(0.9, 0.999),",
     "                                     eps=1e-8, num_epochs=40, batch_size=32,",
     "                                     scheduler=None, warmup_epochs=0, grad_clip=None,",
-    "                                     criterion='ce', label_smoothing=0.0)",
+    "                                     criterion='ce', label_smoothing=0.0, early_stop_loss=0.01)",
     "    return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), num_epochs=80,",
     "                                 betas=(0.9, 0.95), grad_clip=1.0, lr=5e-4, floor_lr=1e-6)",
     "",
