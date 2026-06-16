@@ -1,0 +1,9 @@
+# TF-Mamba gốc — phụ thuộc. mamba-ssm + causal-conv1d cần CUDA GPU.
+torch>=2.0
+mamba-ssm
+causal-conv1d
+PyWavelets
+scipy
+numpy
+scikit-learn
+tqdm

@@ -331,7 +331,8 @@ def main(model_name: str, output_dir,
          num_classes: int = NUM_CLASSES,
          class_names: list = None,
          dataset_name: str = None,
-         split_desc: str = None):
+         split_desc: str = None,
+         norm_mode: str = 'double'):
     """num_classes / class_names default to XRF55 (11, ACTION_NAMES). Override
     for other datasets (HUST=6, UT-HAR=7, NTU-Fi=6) so eval/CM use the right labels.
 
@@ -391,6 +392,7 @@ def main(model_name: str, output_dir,
             model_name, stats,
             bench_dir=bench_dir,
             batch_size=cfg.batch_size, num_workers=num_workers,
+            norm_mode=norm_mode,
         )
 
         model     = mc['factory']().to(device)
@@ -490,6 +492,7 @@ def main(model_name: str, output_dir,
                 model_name, stats,
                 bench_dir=bench_dir,
                 batch_size=cfg.batch_size, num_workers=0,
+                norm_mode=norm_mode,
             )
 
         with open(seed_dir / 'training_log.csv', 'w', newline='') as f:
@@ -613,7 +616,8 @@ def run(model_name: str, bench_dir=None,
         output_dir=None, train_cfg=None,
         num_workers: int = 4, model_kwargs: dict = None,
         num_classes: int = NUM_CLASSES, class_names: list = None,
-        dataset_name: str = None, split_desc: str = None):
+        dataset_name: str = None, split_desc: str = None,
+        norm_mode: str = 'double'):
     """Callable entry point for Kaggle notebooks.
 
     model_kwargs: extra model constructor kwargs (wavdualmamba only), e.g.
@@ -630,7 +634,8 @@ def run(model_name: str, bench_dir=None,
          bench_dir=_bench,
          cfg=train_cfg, num_workers=num_workers, model_kwargs=model_kwargs,
          num_classes=num_classes, class_names=class_names,
-         dataset_name=dataset_name, split_desc=split_desc)
+         dataset_name=dataset_name, split_desc=split_desc,
+         norm_mode=norm_mode)
 
 
 def _default_bench_dir():

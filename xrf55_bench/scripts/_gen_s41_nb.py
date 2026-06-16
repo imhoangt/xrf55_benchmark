@@ -56,6 +56,13 @@ cells.append(md(
     "dual-stream của paper (không DWT/AdaptiveFusion/proj_s3/PE/GAP trong code public). "
     "`MODEL='tfmamba'` của ta = **kiến trúc paper** (dual-stream, đầy đủ hơn code public).",
     "",
+    "**Chia dataset (giống git họ):** HUST random 80/20 (seed 42); UT-HAR official "
+    "train=X_train / test=X_test (val KHÔNG dùng; `MERGE_VAL=True` để gộp val vào test); "
+    "NTU-Fi train_amp/test_amp. "
+    "**Chuẩn hoá theo `NORM_MODE`:** HUST luôn `data_norm` (z per-position); UT-HAR/NTU-Fi "
+    "dùng norm **SenseFi** (min-max / hằng-số) trên raw trước DWT — `author` (đúng tác giả, "
+    "không z lại) hoặc `double` (SenseFi + z). Cần **build lại** UT-HAR/NTU-Fi để áp SenseFi pre-norm.",
+    "",
     "**Trước khi chạy:** Add Input 3 dataset RAW (`hust_dataset`, `ut_har_dataset`, "
     "`ntu_fi_dataset`) + bật **GPU**.",
 ))
@@ -94,6 +101,8 @@ cells.append(code(
     "",
     "MODEL    = 'tfmamba'   # 'tfmamba' (gốc) | 's41' (WavDualMamba Haar-3)",
     "PROTOCOL = 'theirs'    # 'theirs' (TF-Mamba paper) | 'mine' (02*)",
+    "NORM_MODE = 'author'   # 'author' (UT-HAR/NTU-Fi dùng norm SenseFi, đúng tác giả) | 'double' (+ z-norm)",
+    "MERGE_VAL = False      # CHI UT-HAR: False=git SenseFi (test=X_test) | True=gộp val vào test",
     "DATASETS = ['hust', 'uthar', 'ntufi']",
     "MODES    = ['raw']     # ['raw'] | ['proc'] | ['raw','proc']",
     "SEEDS    = [0, 4, 8, 17, 42]",
@@ -171,13 +180,16 @@ cells.append(code(
     "    raw   = resolve_mount(ds)",
     "    bench = Path(OUT_ROOT) / DIRMAP[ds] / 'bench' / md",
     "    out   = Path(f'{OUT_ROOT}/outputs/{MODEL}_{ds}_{md}_{PROTOCOL}')",
-    "    subprocess.run([sys.executable, str(build_py), '--dataset', ds, '--mode', md,",
-    "                    '--raw-root', raw, '--out-root', OUT_ROOT, '--format', FORMAT], check=True)",
+    "    cmd = [sys.executable, str(build_py), '--dataset', ds, '--mode', md,",
+    "           '--raw-root', raw, '--out-root', OUT_ROOT, '--format', FORMAT]",
+    "    if MERGE_VAL: cmd.append('--merge-val')",
+    "    subprocess.run(cmd, check=True)",
     "    meta = json.load(open(bench / 'stats.json'))['meta']",
     "    mname, mk = model_setup(meta)",
     "    run(model_name=mname, bench_dir=bench, output_dir=out, train_cfg=make_cfg(),",
     "        num_workers=4, model_kwargs=mk, num_classes=meta['classes'],",
-    "        class_names=meta['class_names'], dataset_name=ds, split_desc=meta['split'])",
+    "        class_names=meta['class_names'], dataset_name=ds, split_desc=meta['split'],",
+    "        norm_mode=NORM_MODE)",
     "",
     "results = {}",
     "for ds in DATASETS:",

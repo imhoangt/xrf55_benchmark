@@ -81,21 +81,24 @@ def load_hust(root):
     return X, y, splits
 
 
-def load_uthar(root):
+def load_uthar(root, merge_val=False):
     """UT-HAR: .npy stored as .csv. X (N,250,90)=time x (3ant*30sub); needs
-    TRANSPOSE -> (N,90,250) feature-major. 7 classes. Official train/val/test;
-    per user decision val is MERGED INTO TEST (train=3977, test=500+496=996)."""
+    TRANSPOSE -> (N,90,250) feature-major (for DWT). 7 classes.
+
+    merge_val=False (git SenseFi): train=X_train(3977), test=X_test(500); val(496) unused.
+    merge_val=True : test = X_test + X_val (500+496=996)."""
     def ld(name):
         return np.load(_find(root, f'{name}.csv'), allow_pickle=True)
     Xtr = ld('X_train').astype(np.float32).transpose(0, 2, 1)   # (3977,90,250)
     Xte = ld('X_test').astype(np.float32).transpose(0, 2, 1)    # (500,90,250)
-    Xva = ld('X_val').astype(np.float32).transpose(0, 2, 1)     # (496,90,250)
-    ytr = ld('y_train').astype(np.int64)
-    yte = ld('y_test').astype(np.int64)
-    yva = ld('y_val').astype(np.int64)
-    X = np.concatenate([Xtr, Xte, Xva], axis=0)
-    y = np.concatenate([ytr, yte, yva], axis=0)
-    n_tr, n_te = len(Xtr), len(Xte) + len(Xva)        # val folded into test
+    parts_X = [Xtr, Xte]
+    parts_y = [ld('y_train').astype(np.int64), ld('y_test').astype(np.int64)]
+    if merge_val:
+        parts_X.append(ld('X_val').astype(np.float32).transpose(0, 2, 1))   # (496,90,250)
+        parts_y.append(ld('y_val').astype(np.int64))
+    X = np.concatenate(parts_X, axis=0)
+    y = np.concatenate(parts_y, axis=0)
+    n_tr = len(Xtr); n_te = len(X) - n_tr
     splits = {'train': np.arange(n_tr),
               'test':  np.arange(n_tr, n_tr + n_te)}
     return X, y, splits
@@ -153,9 +156,30 @@ CLASS_NAMES = {
 
 SPLIT_DESC = {
     'hust':  'random 80/20 (seed 42, subject-mixed)',
-    'uthar': 'official train; test = official test + val',
+    'uthar': 'official train=X_train; test=X_test (val unused, SenseFi git)',
     'ntufi': 'official train_amp / test_amp folders',
 }
+
+# SenseFi RAW normalization (UT_HAR_dataset / CSI_Dataset). Applied BEFORE the Haar
+# DWT for uthar/ntufi so the build matches the TF-Mamba authors' acknowledged toolchain
+# (https://github.com/.../WiFi-CSI-Sensing-Benchmark). HUST has no SenseFi pre-norm.
+NTUFI_MEAN, NTUFI_STD = 42.3199, 4.9802   # CSI_Dataset: (x - 42.3199)/4.9802
+
+
+def _sensefi_prenorm(dataset, X, splits):
+    """Norm RAW (truoc DWT) giong het SenseFi. Tra (X, prenorm_applied: bool).
+      uthar : min-max toan cuc TUNG split  (x-min)/(max-min)   [UT_HAR_dataset]
+      ntufi : hang so co dinh (x-42.3199)/4.9802               [CSI_Dataset]
+      hust  : khong pre-norm (dung data_norm z sau DWT)."""
+    if dataset == 'uthar':
+        for idx in splits.values():
+            seg = X[idx]
+            mn, mx = float(seg.min()), float(seg.max())
+            X[idx] = (seg - mn) / (mx - mn)
+        return X, True
+    if dataset == 'ntufi':
+        return ((X - np.float32(NTUFI_MEAN)) / np.float32(NTUFI_STD)).astype(np.float32), True
+    return X, False
 
 
 DIRMAP = {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}
@@ -168,11 +192,13 @@ def _finalize(s, s2, n):
     return mean.astype(np.float32).tolist(), std.astype(np.float32).tolist()
 
 
-def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba'):
+def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
+          merge_val=False):
     """raw_root: where the raw dataset lives (default local dataset/<DIR>; on Kaggle
     pass the mounted dataset path). out_root: where bench/ is written.
     fmt: 'wavmamba' (S4.1 packed [LL|HL|LH]) | 'tfmamba' (2-stream xh=HL, xv=LH
-    flat, for the original TF-Mamba) | 'both'. Haar is computed once either way."""
+    flat, for the original TF-Mamba) | 'both'. Haar is computed once either way.
+    merge_val: CHI UT-HAR — True thi gop X_val vao test (mac dinh False = git SenseFi)."""
     cfg = DATASETS[dataset]
     do_filter = (mode == 'proc')
     n_ant, sub, n_per_sub, fs = cfg['n_ant'], cfg['sub'], cfg['n_per_sub'], cfg['fs']
@@ -182,9 +208,15 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba')
     base_out = Path(out_root) / DIRMAP[dataset] if out_root else DATA_ROOT / DIRMAP[dataset]
 
     print(f'Loading {dataset} from {raw_root} ...')
-    X, y, splits = cfg['loader'](raw_root)
+    if dataset == 'uthar':
+        X, y, splits = cfg['loader'](raw_root, merge_val=merge_val)
+    else:
+        X, y, splits = cfg['loader'](raw_root)
     N, AxS, time = X.shape
     assert AxS == n_ant * sub, f'axis1 {AxS} != n_ant*sub {n_ant*sub}'
+    X, prenorm = _sensefi_prenorm(dataset, X, splits)   # SenseFi raw norm (uthar/ntufi)
+    if prenorm:
+        print(f'  SenseFi pre-norm (raw, before DWT) applied for {dataset}')
     C, T2, F2 = 3 * n_per_sub, time // 2, sub // 2
     M = n_per_sub * F2                      # tfmamba flat feature dim (= n_ant*sub//2)
     print(f'  N={N}  raw=({AxS},{time})  fmt={fmt}  -> wav=({C},{T2},{F2}) / tf xh,xv=({T2},{M})')
@@ -202,14 +234,19 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba')
         mm = {sp: np.lib.format.open_memmap(str(out_dir / 'wavmamba' / f'X_{sp}.npy'),
               mode='w+', dtype=np.float32, shape=(len(idx), C, T2, F2))
               for sp, idx in splits.items()}
-        s = np.zeros((C, F2)); s2 = np.zeros((C, F2)); n_wav = np.int64(0)
+        # S4.1 cung PER-POSITION (C,T2,F2) de cong bang voi tfmamba goc (cung per-position).
+        # XRF55 (02 build) van per-channel-bin (C,F2). Dataset tu nhan-biet-shape.
+        s = np.zeros((C, T2, F2)); s2 = np.zeros((C, T2, F2)); n_wav = np.int64(0)
     if do_tf:
         (out_dir / 'tfmamba').mkdir(exist_ok=True)
         xh_mm = {sp: np.lib.format.open_memmap(str(out_dir / 'tfmamba' / f'X_{sp}_xh.npy'),
                  mode='w+', dtype=np.float32, shape=(len(idx), T2, M)) for sp, idx in splits.items()}
         xv_mm = {sp: np.lib.format.open_memmap(str(out_dir / 'tfmamba' / f'X_{sp}_xv.npy'),
                  mode='w+', dtype=np.float32, shape=(len(idx), T2, M)) for sp, idx in splits.items()}
-        hs = np.zeros(M); hs2 = np.zeros(M); vs = np.zeros(M); vs2 = np.zeros(M); n_tf = np.int64(0)
+        # tfmamba (model goc) chuan hoa PER-POSITION (T2,M) = data_norm cua git TF-Mamba
+        # (khac wavmamba/S4.1 dung per-channel-bin). XRF55 (01/02) van dung (M,) per-feature.
+        hs = np.zeros((T2, M)); hs2 = np.zeros((T2, M))
+        vs = np.zeros((T2, M)); vs2 = np.zeros((T2, M)); n_tf = np.int64(0)
 
     for sp, idx in splits.items():
         for j, i in enumerate(tqdm(idx, desc=f'  [{sp}] {fmt}', unit='smp')):
@@ -218,31 +255,37 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba')
                 x = np.concatenate([to_maps(LL, n_per_sub), to_maps(HL, n_per_sub),
                                     to_maps(LH, n_per_sub)], axis=0).astype(np.float32, copy=False)
                 mm[sp][j] = x
-                xd = x.astype(np.float64); s += xd.sum(1); s2 += (xd * xd).sum(1); n_wav += T2
+                xd = x.astype(np.float64); s += xd; s2 += xd * xd; n_wav += 1   # per-position (C,T2,F2)
             if do_tf:
                 xh_mm[sp][j] = HL; xv_mm[sp][j] = LH
                 hd = HL.astype(np.float64); vd = LH.astype(np.float64)
-                hs += hd.sum(0); hs2 += (hd * hd).sum(0)
-                vs += vd.sum(0); vs2 += (vd * vd).sum(0); n_tf += T2
+                hs += hd; hs2 += hd * hd          # per-position (T2,M): cong don qua samples
+                vs += vd; vs2 += vd * vd; n_tf += 1
 
     meta = dict(dataset=dataset, mode=mode, fs=fs, do_filter=do_filter,
                 n_ant=n_ant, sub=sub, n_per_sub=n_per_sub, C=C, T2=T2, F2=F2, M=M,
                 classes=cfg['classes'], class_names=CLASS_NAMES[dataset],
-                split_seed=SPLIT_SEED, split=SPLIT_DESC[dataset],
+                split_seed=SPLIT_SEED,
+                split=('official train=X_train; test=X_test+X_val (merged)'
+                       if (dataset == 'uthar' and merge_val) else SPLIT_DESC[dataset]),
+                merge_val=(merge_val if dataset == 'uthar' else None),
                 subband_order='LL|HL|LH', norm='all-reps',
+                sensefi_prenorm=prenorm,   # True cho uthar/ntufi: z-norm load-time bo qua khi norm_mode='author'
                 source=('multi_hampel_lpf' if do_filter else 'multi_raw'))
     if do_filter:
         meta['filter'] = dict(hampel_window=8, hampel_nsigma=3.0,
                               lpf_order=4, lpf_cutoff_hz=20.0)
     stats = {'meta': meta}
     if do_wav:
-        mean, std = _finalize(s, s2, n_wav)            # (C,F2) per channel,bin
+        mean, std = _finalize(s, s2, n_wav)            # (C,T2,F2) per-position
         stats['wavmamba'] = {'mean': mean, 'std': std}
+        meta['wavmamba_norm'] = 'per-position'         # (C,T2,F2); XRF55 builds = per-channel-bin (C,F2)
     if do_tf:
-        xh_m, xh_s = _finalize(hs, hs2, n_tf)          # (M,) per feature
+        xh_m, xh_s = _finalize(hs, hs2, n_tf)          # (T2,M) per-position (data_norm)
         xv_m, xv_s = _finalize(vs, vs2, n_tf)
         stats['tfmamba'] = {'xh_mean': xh_m, 'xh_std': xh_s, 'xv_mean': xv_m, 'xv_std': xv_s}
         meta['tfmamba_subband_naming'] = 'paper-eq5'   # xh file holds HL content
+        meta['tfmamba_norm'] = 'per-position'          # (T2,M) data_norm; XRF55 builds = per-feature (M,)
     with open(out_dir / 'stats.json', 'w') as f:
         json.dump(stats, f)
     for d in (mm, xh_mm, xv_mm):
@@ -262,5 +305,8 @@ if __name__ == '__main__':
                     help='Where bench/ is written (default local dataset/<DIR>; on Kaggle: /kaggle/working)')
     ap.add_argument('--format', default='wavmamba', choices=['wavmamba', 'tfmamba', 'both'],
                     help='wavmamba=S4.1 packed | tfmamba=2-stream xh/xv | both')
+    ap.add_argument('--merge-val', action='store_true',
+                    help='CHI UT-HAR: gop X_val vao test (mac dinh khong, giong git SenseFi)')
     args = ap.parse_args()
-    build(args.dataset, args.mode, raw_root=args.raw_root, out_root=args.out_root, fmt=args.format)
+    build(args.dataset, args.mode, raw_root=args.raw_root, out_root=args.out_root,
+          fmt=args.format, merge_val=args.merge_val)
