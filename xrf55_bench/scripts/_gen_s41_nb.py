@@ -41,15 +41,16 @@ cells.append(md(
     "| `tfmamba` | **TF-Mamba gốc** (paper Liu 2025): Linear embed+PE, uni-Mamba×3, AdaptiveFusion, proj_s3, GAP |",
     "| `s41` | WavDualMamba Haar-3 {LL,HL,LH} + AttnStatPool (mô hình tốt nhất của ta) |",
     "",
-    "| PROTOCOL | optimizer | lr | wd | epochs | early-stop |",
-    "|---|---|---|---|---|---|",
-    "| `theirs` (= CODE gốc) | AdamW | **1e-3** | 0.01 | 40 | `if loss<0.01: break` |",
-    "| `mine` | AdamW | 5e-4→1e-6 warmup+cosine | 1e-3 | 80 | — |",
+    "| PROTOCOL | optimizer | lr | wd | epochs | grad-clip | early-stop |",
+    "|---|---|---|---|---|---|---|",
+    "| `theirs` (TF-Mamba paper) | AdamW | **1e-4** | 0.01 | 40 | 1.0 | `if loss<0.01: break` |",
+    "| `mine` | AdamW | 5e-4→1e-6 warmup+cosine | 1e-3 | 80 | 1.0 | — |",
     "",
-    "`theirs` khớp **chính xác code gốc** `Mamba_HUST-HAR.py`: `optim.AdamW(lr=1e-3)` "
-    "(→ wd=0.01 default), `CrossEntropyLoss`, 40 epoch, bs 32, không scheduler, "
-    "early-stop `if average_loss<0.01: break`, random 80/20. **LƯU Ý: paper ghi lr=1e-4 "
-    "nhưng CODE dùng lr=1e-3** → ta theo code (số thực tế tạo kết quả).",
+    "`theirs` = protocol TF-Mamba (Liu 2025): **`lr=1e-4` theo PAPER**, "
+    "`CrossEntropyLoss`, 40 epoch, bs 32, không scheduler, "
+    "`clip_grad_norm_(max_norm=1.0)`, early-stop `if average_loss<0.01: break`, random 80/20. "
+    "Các chi tiết wd=0.01 / betas / grad-clip / early-stop lấy từ **code gốc** `Mamba_HUST-HAR.py` "
+    "(paper không ghi rõ). **LƯU Ý: code release dùng lr=1e-3; ta theo PAPER (1e-4) vì đó là giá trị công bố.**",
     "",
     "⚠️ **Repo public chỉ có Mamba 1-stream** (`MambaSimple.py`) — KHÔNG phải TF-Mamba "
     "dual-stream của paper (không DWT/AdaptiveFusion/proj_s3/PE/GAP trong code public). "
@@ -145,16 +146,16 @@ cells.append(code(
     "from xrf55_bench.config import TrainCfg_for_protocol",
     "",
     "def make_cfg():",
-    "    if PROTOCOL == 'theirs':   # KHỚP CHÍNH XÁC code gốc HUST_HAR (Mamba_HUST-HAR.py):",
-    "        # optim.AdamW(model.parameters(), lr=1e-3)  -> lr=1e-3, wd=0.01 (AdamW default),",
-    "        # betas=(0.9,0.999), eps=1e-8; CrossEntropyLoss; 40 epochs; bs=32; no scheduler;",
-    "        # early stopping: if average_loss < 0.01: break  -> early_stop_loss=0.01.",
-    "        # (LƯU Ý: paper ghi lr=1e-4 nhưng CODE dùng lr=1e-3 — ta theo code vì đó là số",
-    "        #  thực tế tạo ra kết quả; report last_model lúc dừng.)",
+    "    if PROTOCOL == 'theirs':   # Protocol TF-Mamba (Liu 2025) — lr theo PAPER, chi tiết khác theo CODE gốc:",
+    "        # lr=1e-4 (PAPER ghi 1e-4; code release Mamba_HUST-HAR.py dùng 1e-3 — ta theo PAPER vì",
+    "        #  đó là giá trị chính thức công bố/citable).",
+    "        # wd=0.01, betas=(0.9,0.999), eps=1e-8 (mặc định AdamW trong code); CrossEntropyLoss;",
+    "        # 40 epochs; bs=32; no scheduler; clip_grad_norm_(max_norm=1.0) (code dòng 140);",
+    "        # early stopping: if average_loss < 0.01: break -> early_stop_loss=0.01; report last_model.",
     "        return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), optimizer='adamw',",
-    "                                     lr=1e-3, weight_decay=0.01, betas=(0.9, 0.999),",
+    "                                     lr=1e-4, weight_decay=0.01, betas=(0.9, 0.999),",
     "                                     eps=1e-8, num_epochs=40, batch_size=32,",
-    "                                     scheduler=None, warmup_epochs=0, grad_clip=None,",
+    "                                     scheduler=None, warmup_epochs=0, grad_clip=1.0,",
     "                                     criterion='ce', label_smoothing=0.0, early_stop_loss=0.01)",
     "    return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), num_epochs=80,",
     "                                 betas=(0.9, 0.95), grad_clip=1.0, lr=5e-4, floor_lr=1e-6)",
