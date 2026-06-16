@@ -60,21 +60,31 @@ def _find(root: Path, name: str) -> Path:
 
 # ── loaders → (X (N, n_ant*sub, time) float32, y (N,) int64, splits) ─────────
 def load_hust(root):
-    """HUST-HAR: (3600, 270, 1000), 6 lop. Random 80/20 (seed 42)."""
+    """HUST-HAR: (3600, 270, 1000), 6 lop. Random 80/20 (seed 42).
+
+    Mount co the gop nhieu dataset -> chon file data uu tien: ten chua 'hust' >
+    cung thu muc voi labels > .pt > size. Ho tro .pt (torch) lan .npy (numpy).
+    Tranh vo phai file dataset khac (vd X_train.npy 5GB)."""
     root = Path(root)
     files = [p for p in root.rglob('*') if p.is_file()]
     lbf = next((p for p in files if 'label' in p.name.lower()), None)
+    if lbf is None:
+        raise FileNotFoundError(f"HUST labels (*label*) khong thay duoi {root}. Files: {_listing(root)}")
     cand = [p for p in files if p is not lbf and 'label' not in p.name.lower()
             and p.suffix.lower() not in ('.txt', '.md', '.json', '.csv')]
-    ptf = max(cand, key=lambda p: p.stat().st_size) if cand else None
-    if ptf is None or lbf is None:
+    if not cand:
         raise FileNotFoundError(
-            f"HUST data/labels khong thay duoi {root}. Files: {_listing(root)}")
+            f"HUST data khong thay canh {lbf.name}. Dir: {[p.name for p in lbf.parent.iterdir()]}")
+    ptf = max(cand, key=lambda p: ('hust' in p.name.lower(), p.parent == lbf.parent,
+                                   p.suffix.lower() in ('.pt', '.pth'), p.stat().st_size))
     print(f"  HUST data={ptf.name} ({ptf.stat().st_size/1e9:.2f}GB)  labels={lbf.name}")
-    d = torch.load(ptf, map_location='cpu', weights_only=False)
-    y = torch.load(lbf, map_location='cpu', weights_only=False)
-    X = d.numpy().astype(np.float32)
-    y = y.numpy().astype(np.int64)
+    if ptf.suffix.lower() == '.npy':
+        X = np.load(ptf, allow_pickle=False).astype(np.float32)
+    else:
+        d = torch.load(ptf, map_location='cpu', weights_only=False)
+        X = (d.numpy() if hasattr(d, 'numpy') else np.asarray(d)).astype(np.float32)
+    yv = torch.load(lbf, map_location='cpu', weights_only=False)
+    y = (yv.numpy() if hasattr(yv, 'numpy') else np.asarray(yv)).astype(np.int64)
     n = len(X)
     perm = np.random.default_rng(SPLIT_SEED).permutation(n)
     n_tr = int(0.8 * n)
