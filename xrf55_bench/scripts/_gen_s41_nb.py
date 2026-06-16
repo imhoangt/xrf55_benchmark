@@ -63,6 +63,12 @@ cells.append(md(
     "dùng norm **SenseFi** (min-max / hằng-số) trên raw trước DWT — `author` (đúng tác giả, "
     "không z lại) hoặc `double` (SenseFi + z). Cần **build lại** UT-HAR/NTU-Fi để áp SenseFi pre-norm.",
     "",
+    "**So sánh CÔNG BẰNG `s41` vs `tfmamba`:** `make_cfg` chỉ phụ thuộc `PROTOCOL` (KHÔNG phụ "
+    "thuộc MODEL); SenseFi pre-norm + split áp ở tầng build (độc lập model); z-norm per-position "
+    "áp cho cả hai. → chạy 2 lần cùng `PROTOCOL`/`NORM_MODE`/`MERGE_VAL`/`SEEDS`, chỉ đổi `MODEL` "
+    "= **protocol + chia dataset + chuẩn hoá GIỐNG HỆT**, khác duy nhất là **kiến trúc model**. "
+    "Mỗi run lưu thư mục riêng theo `RUN_TAG` nên không ghi đè.",
+    "",
     "**Trước khi chạy:** Add Input 3 dataset RAW (`hust_dataset`, `ut_har_dataset`, "
     "`ntu_fi_dataset`) + bật **GPU**.",
 ))
@@ -111,6 +117,7 @@ cells.append(code(
     "DIRMAP  = {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}",
     "_MARKER = {'hust': 'HUST_HAR_labels.pt', 'uthar': 'X_train.csv', 'ntufi': 'train_amp'}",
     "FORMAT  = 'tfmamba' if MODEL == 'tfmamba' else 'wavmamba'   # build layout per model",
+    "RUN_TAG = f'{PROTOCOL}_{NORM_MODE}' + ('_mv' if MERGE_VAL else '')   # phan biet run, tranh ghi de",
     "build_py = CODE_PATH / 'xrf55_bench' / 'scripts' / '10_build_multi.py'",
     "",
     "def resolve_mount(ds):",
@@ -120,8 +127,8 @@ cells.append(code(
     "            return str(c)",
     "    raise FileNotFoundError(f'Không thấy /kaggle/input/* chứa {_MARKER[ds]} cho {ds}')",
     "",
-    "print(f'MODEL={MODEL}  PROTOCOL={PROTOCOL}  FORMAT={FORMAT}')",
-    "print(f'DATASETS={DATASETS}  MODES={MODES}  SEEDS={SEEDS}')",
+    "print(f'MODEL={MODEL}  PROTOCOL={PROTOCOL}  NORM_MODE={NORM_MODE}  MERGE_VAL={MERGE_VAL}  FORMAT={FORMAT}')",
+    "print(f'DATASETS={DATASETS}  MODES={MODES}  SEEDS={SEEDS}  RUN_TAG={RUN_TAG}')",
     "for ds in DATASETS:",
     "    try:    print(f'  {ds:6s} mount: {resolve_mount(ds)}')",
     "    except Exception as e: print(f'  {ds:6s} !! {e}')",
@@ -179,7 +186,7 @@ cells.append(code(
     "def run_one(ds, md):",
     "    raw   = resolve_mount(ds)",
     "    bench = Path(OUT_ROOT) / DIRMAP[ds] / 'bench' / md",
-    "    out   = Path(f'{OUT_ROOT}/outputs/{MODEL}_{ds}_{md}_{PROTOCOL}')",
+    "    out   = Path(f'{OUT_ROOT}/outputs/{MODEL}_{ds}_{md}_{RUN_TAG}')",
     "    cmd = [sys.executable, str(build_py), '--dataset', ds, '--mode', md,",
     "           '--raw-root', raw, '--out-root', OUT_ROOT, '--format', FORMAT]",
     "    if MERGE_VAL: cmd.append('--merge-val')",
@@ -195,7 +202,7 @@ cells.append(code(
     "for ds in DATASETS:",
     "    for md in MODES:",
     "        t0 = time.time()",
-    "        print(f\"\\n{'#'*64}\\n#  {MODEL} / {ds} / {md} / {PROTOCOL}\\n{'#'*64}\")",
+    "        print(f\"\\n{'#'*64}\\n#  {MODEL} / {ds} / {md} / {RUN_TAG}\\n{'#'*64}\")",
     "        try:",
     "            run_one(ds, md); results[f'{ds}/{md}'] = 'OK'",
     "        except Exception as e:",
@@ -216,7 +223,7 @@ cells.append(code(
     "from IPython.display import FileLink, display",
     "",
     "print('--- Results ---')",
-    "for d in sorted(Path('/kaggle/working/outputs').glob(f'{MODEL}_*_{PROTOCOL}')):",
+    "for d in sorted(Path('/kaggle/working/outputs').glob(f'{MODEL}_*_{RUN_TAG}')):",
     "    mp = d / 'metrics.json'",
     "    if not mp.exists():",
     "        continue",
