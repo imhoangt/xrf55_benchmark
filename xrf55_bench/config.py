@@ -16,6 +16,10 @@ class TrainCfg:
     num_epochs:       int            = 200
     grad_clip:        Optional[float]= None    # None = no clipping
     weight_decay:     float          = 0.0
+    # Protocol '02' excludes norm/bias/A_log/D/pos_emb from weight decay. Set False
+    # to decay ALL params — TF-Mamba 'theirs' uses AdamW(model.parameters()) which
+    # decays everything, so the reproduction must too.
+    wd_exclude_norm_bias: bool       = True
 
     # Optimizer: 'adamw' | 'adam' | 'sgd'
     optimizer:        str            = 'adam'

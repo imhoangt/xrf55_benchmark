@@ -205,7 +205,7 @@ def _build_no_decay_set(model: nn.Module) -> set:
 
 
 def _make_optimizer(model: nn.Module, cfg: TrainCfg):
-    if cfg.protocol == '02':
+    if cfg.protocol == '02' and cfg.wd_exclude_norm_bias:
         no_decay   = _build_no_decay_set(model)
         decay_p    = [p for n, p in model.named_parameters()
                       if p.requires_grad and n not in no_decay]
