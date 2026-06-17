@@ -1,4 +1,4 @@
-"""Generate xrf55_bench/notebooks/s41_multidataset.ipynb (nbformat v4).
+"""Generate xrf55_bench/notebooks/s4_multidataset.ipynb (nbformat v4).
 
 Applies a chosen MODEL (TF-Mamba original | S4 WavDualMamba Haar 2-subband) under a chosen
 PROTOCOL (theirs = TF-Mamba paper | mine = 02*) to HUST / UT-HAR / NTU-Fi, in one
@@ -259,6 +259,6 @@ nb = {
     "nbformat_minor": 5,
 }
 
-out = Path(__file__).parent.parent / 'notebooks' / 's41_multidataset.ipynb'
+out = Path(__file__).parent.parent / 'notebooks' / 's4_multidataset.ipynb'
 json.dump(nb, open(out, 'w', encoding='utf-8'), indent=1, ensure_ascii=False)
 print(f'wrote {out}  ({len(cells)} cells)')
