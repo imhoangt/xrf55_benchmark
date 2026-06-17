@@ -1,7 +1,9 @@
-"""Build packed Haar-3 (S4.1) bench arrays for HUST-HAR / UT-HAR / NTU-Fi.
+"""Build packed Haar bench arrays for HUST-HAR / UT-HAR / NTU-Fi.
 
-Output layout matches PreprocWavMambaDataset (dataset.py), so S4.1 trains via the
-existing, tested model_name='wavdualmamba' path — no new dataset/model code.
+Output layout matches PreprocWavMambaDataset (dataset.py), so WavDualMamba trains
+via the existing, tested model_name='wavdualmamba' path — no new dataset/model code.
+Subbands packed are selectable via --wav-subbands: 'LL,HL,LH' (S4.1, 3 bang) or
+'HL,LH' (S4, 2 bang). Stats + meta auto-track the actual channel count C.
 
 Output per (dataset, mode): UN-NORMALIZED packed arrays + stats.json (all-reps).
 Normalization (z-score per channel,bin) is applied at load time, matching XRF55.
@@ -202,12 +204,19 @@ def _finalize(s, s2, n):
 
 
 def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
-          merge_val=False):
+          merge_val=False, wav_subs=('LL', 'HL', 'LH')):
     """raw_root: where the raw dataset lives (default local dataset/<DIR>; on Kaggle
     pass the mounted dataset path). out_root: where bench/ is written.
-    fmt: 'wavmamba' (S4.1 packed [LL|HL|LH]) | 'tfmamba' (2-stream xh=HL, xv=LH
-    flat, for the original TF-Mamba) | 'both'. Haar is computed once either way.
+    fmt: 'wavmamba' (packed [subbands] for WavDualMamba) | 'tfmamba' (2-stream
+    xh=HL, xv=LH flat, for the original TF-Mamba) | 'both'. Haar computed once.
+    wav_subs: which Haar subbands to pack for the wavmamba format, IN ORDER:
+      ('LL','HL','LH') = S4.1 (3 bang, mac dinh) | ('HL','LH') = S4 (2 bang, no LL).
+      Chi anh huong fmt wavmamba; thu tu nay = subband order model phai khop.
     merge_val: CHI UT-HAR — True thi gop X_val vao test (mac dinh False = git SenseFi)."""
+    _VALID = ('LL', 'HL', 'LH')
+    wav_subs = tuple(wav_subs)
+    if not wav_subs or any(s not in _VALID for s in wav_subs):
+        raise ValueError(f'wav_subs phai la tap con co thu tu cua {_VALID}, got {wav_subs}')
     cfg = DATASETS[dataset]
     do_filter = (mode == 'proc')
     n_ant, sub, n_per_sub, fs = cfg['n_ant'], cfg['sub'], cfg['n_per_sub'], cfg['fs']
@@ -226,9 +235,10 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
     X, prenorm = _sensefi_prenorm(dataset, X, splits)   # SenseFi raw norm (uthar/ntufi)
     if prenorm:
         print(f'  SenseFi pre-norm (raw, before DWT) applied for {dataset}')
-    C, T2, F2 = 3 * n_per_sub, time // 2, sub // 2
+    C, T2, F2 = len(wav_subs) * n_per_sub, time // 2, sub // 2   # C = #subbands * n_per_sub
     M = n_per_sub * F2                      # tfmamba flat feature dim (= n_ant*sub//2)
-    print(f'  N={N}  raw=({AxS},{time})  fmt={fmt}  -> wav=({C},{T2},{F2}) / tf xh,xv=({T2},{M})')
+    print(f'  N={N}  raw=({AxS},{time})  fmt={fmt}  wav_subs={wav_subs}  '
+          f'-> wav=({C},{T2},{F2}) / tf xh,xv=({T2},{M})')
     print(f'  mode={mode}  do_filter={do_filter}  fs={fs}  classes={cfg["classes"]}')
     print(f'  split: ' + '  '.join(f'{k}={len(v)}' for k, v in splits.items()))
 
@@ -261,8 +271,9 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
         for j, i in enumerate(tqdm(idx, desc=f'  [{sp}] {fmt}', unit='smp')):
             LL, HL, LH = haar3_subbands(X[i], n_ant, sub, fs=fs, do_filter=do_filter)  # each (T2,M)
             if do_wav:
-                x = np.concatenate([to_maps(LL, n_per_sub), to_maps(HL, n_per_sub),
-                                    to_maps(LH, n_per_sub)], axis=0).astype(np.float32, copy=False)
+                _sb = {'LL': LL, 'HL': HL, 'LH': LH}                 # pack chi cac bang trong wav_subs, dung thu tu
+                x = np.concatenate([to_maps(_sb[s], n_per_sub) for s in wav_subs],
+                                   axis=0).astype(np.float32, copy=False)
                 mm[sp][j] = x
                 xd = x.astype(np.float64); s += xd; s2 += xd * xd; n_wav += 1   # per-position (C,T2,F2)
             if do_tf:
@@ -278,7 +289,7 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
                 split=('official train=X_train; test=X_test+X_val (merged)'
                        if (dataset == 'uthar' and merge_val) else SPLIT_DESC[dataset]),
                 merge_val=(merge_val if dataset == 'uthar' else None),
-                subband_order='LL|HL|LH', norm='all-reps',
+                subband_order='|'.join(wav_subs), norm='all-reps',
                 sensefi_prenorm=prenorm,   # True cho uthar/ntufi: z-norm load-time bo qua khi norm_mode='author'
                 source=('multi_hampel_lpf' if do_filter else 'multi_raw'))
     if do_filter:
@@ -313,9 +324,12 @@ if __name__ == '__main__':
     ap.add_argument('--out-root', default=None,
                     help='Where bench/ is written (default local dataset/<DIR>; on Kaggle: /kaggle/working)')
     ap.add_argument('--format', default='wavmamba', choices=['wavmamba', 'tfmamba', 'both'],
-                    help='wavmamba=S4.1 packed | tfmamba=2-stream xh/xv | both')
+                    help='wavmamba=packed [subbands] | tfmamba=2-stream xh/xv | both')
+    ap.add_argument('--wav-subbands', default='LL,HL,LH',
+                    help='wavmamba pack: "LL,HL,LH"=S4.1 (3 bang) | "HL,LH"=S4 (2 bang, no LL)')
     ap.add_argument('--merge-val', action='store_true',
                     help='CHI UT-HAR: gop X_val vao test (mac dinh khong, giong git SenseFi)')
     args = ap.parse_args()
+    wav_subs = tuple(s.strip() for s in args.wav_subbands.split(',') if s.strip())
     build(args.dataset, args.mode, raw_root=args.raw_root, out_root=args.out_root,
-          fmt=args.format, merge_val=args.merge_val)
+          fmt=args.format, merge_val=args.merge_val, wav_subs=wav_subs)

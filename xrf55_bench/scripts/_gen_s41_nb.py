@@ -1,6 +1,6 @@
 """Generate xrf55_bench/notebooks/s41_multidataset.ipynb (nbformat v4).
 
-Applies a chosen MODEL (TF-Mamba original | S4.1 WavDualMamba) under a chosen
+Applies a chosen MODEL (TF-Mamba original | S4 WavDualMamba Haar 2-subband) under a chosen
 PROTOCOL (theirs = TF-Mamba paper | mine = 02*) to HUST / UT-HAR / NTU-Fi, in one
 run. Builds the matching packed bench in-notebook from the mounted RAW Kaggle
 datasets, then sweeps DATASETS x MODES. Dataset-specifics read from stats.json.
@@ -31,7 +31,7 @@ def _src(lines):
 cells = []
 
 cells.append(md(
-    "# Multi-dataset — TF-Mamba (gốc) / S4.1 WavDualMamba on HUST / UT-HAR / NTU-Fi",
+    "# Multi-dataset — TF-Mamba (gốc) / S4 WavDualMamba (Haar 2 băng) on HUST / UT-HAR / NTU-Fi",
     "",
     "Chọn **MODEL** + **PROTOCOL** ở Cell 3, chạy 1 lần cho cả 3 dataset (sweep).",
     "Notebook build packed bench ngay trong notebook từ dataset RAW đã mount.",
@@ -39,12 +39,12 @@ cells.append(md(
     "| MODEL | Mô tả |",
     "|---|---|",
     "| `tfmamba` | **TF-Mamba gốc** (paper Liu 2025): Linear embed+PE, uni-Mamba×3, AdaptiveFusion, proj_s3, GAP |",
-    "| `s41` | WavDualMamba Haar-3 {LL,HL,LH} + AttnStatPool (mô hình tốt nhất của ta) |",
+    "| `s4` | WavDualMamba Haar 2 băng {HL,LH} (KHÔNG có LL) + AttnStatPool (= ablation S4) |",
     "",
     "| PROTOCOL | optimizer | lr | wd | epochs | grad-clip | early-stop |",
     "|---|---|---|---|---|---|---|",
     "| `theirs` (TF-Mamba paper) | AdamW | **1e-4** | 0.01 | 40 | 1.0 | `if loss<0.01: break` |",
-    "| `mine` | AdamW | 5e-4→1e-6 warmup+cosine | 1e-3 | 80 | 1.0 | `loss<MINE_EARLY_STOP` (0.01) |",
+    "| `mine` | AdamW | 5e-4→1e-6 warmup+cosine | 1e-3 | 30 | 1.0 | tắt (MINE_EARLY_STOP=None) |",
     "",
     "`theirs` = protocol TF-Mamba (Liu 2025): **`lr=1e-4` theo PAPER**, "
     "`CrossEntropyLoss`, 40 epoch, bs 32, không scheduler, "
@@ -63,7 +63,7 @@ cells.append(md(
     "dùng norm **SenseFi** (min-max / hằng-số) trên raw trước DWT — `author` (đúng tác giả, "
     "không z lại) hoặc `double` (SenseFi + z). Cần **build lại** UT-HAR/NTU-Fi để áp SenseFi pre-norm.",
     "",
-    "**So sánh CÔNG BẰNG `s41` vs `tfmamba`:** `make_cfg` chỉ phụ thuộc `PROTOCOL` (KHÔNG phụ "
+    "**So sánh CÔNG BẰNG `s4` vs `tfmamba`:** `make_cfg` chỉ phụ thuộc `PROTOCOL` (KHÔNG phụ "
     "thuộc MODEL); SenseFi pre-norm + split áp ở tầng build (độc lập model); z-norm per-position "
     "áp cho cả hai. → chạy 2 lần cùng `PROTOCOL`/`NORM_MODE`/`MERGE_VAL`/`SEEDS`, chỉ đổi `MODEL` "
     "= **protocol + chia dataset + chuẩn hoá GIỐNG HỆT**, khác duy nhất là **kiến trúc model**. "
@@ -105,11 +105,11 @@ cells.append(code(
     "# Cell 3 — Configuration",
     "from pathlib import Path",
     "",
-    "MODEL    = 'tfmamba'   # 'tfmamba' (gốc) | 's41' (WavDualMamba Haar-3)",
+    "MODEL    = 'tfmamba'   # 'tfmamba' (gốc) | 's4' (WavDualMamba Haar 2 băng {HL,LH}, no LL = ablation S4)",
     "PROTOCOL = 'theirs'    # 'theirs' (TF-Mamba paper) | 'mine' (02*)",
     "NORM_MODE = 'double'   # 'author' (UT-HAR/NTU-Fi dùng norm SenseFi, đúng tác giả) | 'double' (+ z-norm)",
     "MERGE_VAL = True       # CHI UT-HAR: False=git SenseFi (test=X_test) | True=gộp val vào test",
-    "MINE_EARLY_STOP = 0.01 # 'mine': dừng sớm khi train-loss < ngưỡng (~0 = gần hội tụ). 'theirs' cố định 0.01 (tác giả)",
+    "MINE_EARLY_STOP = None # 'mine': mặc định TẮT early-stop. Đặt số (vd 0.01) để bật. 'theirs' cố định 0.01 (tác giả)",
     "WARMUP_EPOCHS = 5      # 'mine': số epoch warmup cho warmup_cosine. 'theirs' không scheduler nên không dùng",
     "DATASETS = ['hust', 'uthar', 'ntufi']",
     "MODES    = ['raw']     # ['raw'] | ['proc'] | ['raw','proc']",
@@ -119,6 +119,7 @@ cells.append(code(
     "DIRMAP  = {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}",
     "_MARKER = {'hust': 'HUST_HAR_labels.pt', 'uthar': 'X_train.csv', 'ntufi': 'train_amp'}",
     "FORMAT  = 'tfmamba' if MODEL == 'tfmamba' else 'wavmamba'   # build layout per model",
+    "WAV_SUBS = 'HL,LH' if MODEL == 's4' else 'LL,HL,LH'   # s4 = Haar 2 bang (no LL); chi dung khi FORMAT=wavmamba",
     "RUN_TAG = f'{PROTOCOL}_{NORM_MODE}' + ('_mv' if MERGE_VAL else '')   # phan biet run, tranh ghi de",
     "build_py = CODE_PATH / 'xrf55_bench' / 'scripts' / '10_build_multi.py'",
     "",
@@ -145,12 +146,12 @@ cells.append(code(
     "    _m = TFMamba(num_features=135, d_model=64, num_layers=3, num_classes=6, max_len=500).to(dev)",
     "    with torch.no_grad():",
     "        _o = _m(torch.randn(2, 500, 135, device=dev), torch.randn(2, 500, 135, device=dev))",
-    "else:",
+    "else:   # s4 = WavDualMamba Haar 2 bang {HL,LH} -> packed C = 2*n_antennas = 18 (HUST)",
     "    from xrf55_bench.models.wavdualmamba.model import WavDualMamba",
     "    _m = WavDualMamba(num_classes=6, n_links=1, n_antennas=9, f2=15,",
-    "                      subbands=('LL', 'HL', 'LH'), pool='attnstat').to(dev)",
+    "                      subbands=('HL', 'LH'), pool='attnstat').to(dev)",
     "    with torch.no_grad():",
-    "        _o = _m(torch.randn(2, 27, 16, 15, device=dev))",
+    "        _o = _m(torch.randn(2, 18, 16, 15, device=dev))",
     "assert _o.shape == (2, 6), f'bad output {tuple(_o.shape)}'",
     "del _m, _o",
     "if dev == 'cuda':",
@@ -171,7 +172,7 @@ cells.append(code(
     "        # 40 epochs; bs=32; no scheduler; clip_grad_norm_(max_norm=1.0) (code dòng 140);",
     "        # early stopping: if average_loss < 0.01: break -> early_stop_loss=0.01; report last_model.",
     "        # wd_exclude_norm_bias=False: AdamW(model.parameters()) cua ho decay MOI param",
-    "        #   (KHONG loai tru norm/bias/A_log/D/pos_emb) -> ap cho ca tfmamba lan S4.1.",
+    "        #   (KHONG loai tru norm/bias/A_log/D/pos_emb) -> ap cho ca tfmamba lan S4.",
     "        return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), optimizer='adamw',",
     "                                     lr=1e-4, weight_decay=0.01, betas=(0.9, 0.999),",
     "                                     eps=1e-8, num_epochs=40, batch_size=32,",
@@ -180,7 +181,7 @@ cells.append(code(
     "                                     wd_exclude_norm_bias=False)",
     "    # 'mine' (02*): them early_stop_loss=MINE_EARLY_STOP -> dung som khi train-loss",
     "    # < nguong (giong co che 'theirs', nhung nguong tu chinh). None de tat.",
-    "    return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), num_epochs=40,",
+    "    return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), num_epochs=30,",
     "                                 betas=(0.9, 0.95), grad_clip=1.0, lr=5e-4, floor_lr=1e-6,",
     "                                 warmup_epochs=WARMUP_EPOCHS, early_stop_loss=MINE_EARLY_STOP)",
     "",
@@ -189,7 +190,7 @@ cells.append(code(
     "    if MODEL == 'tfmamba':",
     "        return 'tfmamba', {'num_features': nps * F2, 'max_len': T2}",
     "    return 'wavdualmamba', {'n_links': 1, 'n_antennas': nps, 'f2': F2,",
-    "                            'subbands': ('LL', 'HL', 'LH'), 'pool': 'attnstat'}",
+    "                            'subbands': ('HL', 'LH'), 'pool': 'attnstat'}   # s4 = 2 bang (no LL)",
     "",
     "def run_one(ds, md):",
     "    raw   = resolve_mount(ds)",
@@ -197,6 +198,7 @@ cells.append(code(
     "    out   = Path(f'{OUT_ROOT}/outputs/{MODEL}_{ds}_{md}_{RUN_TAG}')",
     "    cmd = [sys.executable, str(build_py), '--dataset', ds, '--mode', md,",
     "           '--raw-root', raw, '--out-root', OUT_ROOT, '--format', FORMAT]",
+    "    if FORMAT == 'wavmamba': cmd += ['--wav-subbands', WAV_SUBS]   # s4 -> 'HL,LH'",
     "    if MERGE_VAL: cmd.append('--merge-val')",
     "    subprocess.run(cmd, check=True)",
     "    meta = json.load(open(bench / 'stats.json'))['meta']",
