@@ -58,6 +58,11 @@ Ablation flags (TF-Mamba → WavDualMamba; defaults = TF-Mamba baseline)
                       RMSNorm) — swaps direction, depth AND d_state together.
     pool='attnstat'   GAP → AttnStatPool (attentive mean+std; classifier input
                       doubles to 2·d_model).
+    use_proj_s3=False Skip the paper-faithful proj_s3 + tanh step (S2 → S3).
+                      Default True keeps original TFMamba behaviour. Set False
+                      to test AttnStatPool without tanh clamping to [-1,1] —
+                      tanh collapses temporal variance and disables AttnStatPool's
+                      σ component (see analysis_s3_vs_s4.md).
 
 Each flag swaps ONE TF-Mamba block for its WavDualMamba counterpart. Blocks are
 IMPORTED from wavdualmamba.model (not copied), so they are byte-identical, and
@@ -356,6 +361,9 @@ class TFMamba(nn.Module):
     pool         : 'gap' (baseline) | 'attnstat'
                    'attnstat' replaces GAP with WavDualMamba's AttnStatPool
                    (context=True); classifier input becomes 2·d_model.
+    use_proj_s3  : True (default, paper-faithful) | False
+                   False bypasses the Linear+tanh projection before pooling.
+                   Required for a fair AttnStatPool test (rung S1.2b).
     use_cnn      : False (baseline) | True
                    Per-stream WavDualMamba CNN front-end replaces the Linear
                    embedding (PE kept). See CNNFrontEnd.
@@ -385,6 +393,7 @@ class TFMamba(nn.Module):
         expand:       int = 2,
         max_len:      int = 500,
         pool:         str = 'gap',
+        use_proj_s3:  bool = True,
         use_cnn:      bool = False,
         subband_kernels: bool = True,
         mamba:        str = 'uni',
@@ -439,8 +448,9 @@ class TFMamba(nn.Module):
         # Adaptive fusion  [Eq. 15]
         self.fusion = AdaptiveFusion(d_model)
 
-        # proj_s3: S2 → S3 with tanh  (D′ = D = 64, confirmed by Table I)
-        self.proj_s3 = nn.Linear(d_model, d_model)
+        # proj_s3: S2 → S3 with tanh (D′ = D = 64, confirmed by Table I).
+        # use_proj_s3=False bypasses this for fair AttnStatPool ablations.
+        self.proj_s3 = nn.Linear(d_model, d_model) if use_proj_s3 else None
 
         # Temporal pooling: GAP (baseline) or AttnStatPool (pool='attnstat')
         if pool == 'attnstat':
@@ -474,14 +484,11 @@ class TFMamba(nn.Module):
         # ── Step 2: sequence-level adaptive fusion [Eq. 15] ──────────────────
         S2 = self.fusion(S_T, S_F)           # (B, L, d_model)
 
-        # ── Step 3: linear projection + tanh ─────────────────────────────────
-        S3 = torch.tanh(self.proj_s3(S2))    # (B, L, d_model)
+        # ── Step 3: proj_s3 + tanh (paper-faithful; skipped when use_proj_s3=False) ──
+        h = torch.tanh(self.proj_s3(S2)) if self.proj_s3 is not None else S2
 
         # ── Step 4: temporal pooling — GAP (baseline) or AttnStatPool ─────────
-        if self.tpool is not None:
-            S3 = self.tpool(S3)              # (B, 2·d_model)
-        else:
-            S3 = S3.mean(dim=1)              # (B, d_model)
+        h = self.tpool(h) if self.tpool is not None else h.mean(dim=1)
 
         # ── Step 5: classifier ────────────────────────────────────────────────
-        return self.classifier(S3)           # (B, num_classes)
+        return self.classifier(h)            # (B, num_classes)
