@@ -66,6 +66,8 @@ Ablation flags:
     use_eca        — [C7] ECA channel gate on raw 27-ch input before stems (default False).
     pool_context   — [C8] full ECAPA [x‖μ‖σ] context pooling in AttnStatPool (default True).
     use_final_attn — [C6] one MHSA layer after fusion, before pooling (default False).
+    use_post_fusion_proj — [S4.a/S4.b] plain Linear(d→d) after fusion, before pooling,
+                     NO activation (= TF-Mamba's proj_s3 without the tanh; default False).
 """
 
 from __future__ import annotations
@@ -674,6 +676,7 @@ class WavDualMamba(nn.Module):
         attn_heads: int = 4,
         attn_drop: float = 0.1,
         attn_drop_path: float = 0.1,
+        use_post_fusion_proj: bool = False,
     ):
         super().__init__()
         if len(dp_mamba) != n_mamba_layers:
@@ -728,6 +731,9 @@ class WavDualMamba(nn.Module):
 
         self.eca = ECA() if use_eca else None
         self.fusion = AdaptiveFusion(d_model, self.n_branches, mode=fusion)
+        # [S4.a/S4.b] phep chieu tuyen tinh THUAN (khong activation) sau fusion, truoc
+        # pooling = "proj_s3 cua TF-Mamba nhung BO tanh". Mac dinh tat.
+        self.post_fusion_proj = nn.Linear(d_model, d_model) if use_post_fusion_proj else None
         self.final_attn = (FinalAttention(d_model, n_heads=attn_heads,
                                           attn_drop=attn_drop, drop_path=attn_drop_path)
                            if use_final_attn else None)
@@ -788,6 +794,8 @@ class WavDualMamba(nn.Module):
                        for k, s in enumerate(self.subbands)]
 
         z = self.fusion(streams)                                    # (B, T2, d_model)
+        if self.post_fusion_proj is not None:
+            z = self.post_fusion_proj(z)                            # [S4.a/S4.b] Linear(d->d), khong activation
         if self.final_attn is not None:
             z = self.final_attn(z)                                  # [C6] optional MHSA
         z = self.tpool(z) if self.tpool is not None else z.mean(dim=1)  # AttnStatPool or GAP
