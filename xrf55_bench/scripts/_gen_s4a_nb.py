@@ -43,14 +43,14 @@ cells.append(md(
     "",
     "| PROTOCOL | optimizer | lr | wd | epochs | grad-clip | early-stop |",
     "|---|---|---|---|---|---|---|",
-    "| `theirs` (TF-Mamba paper) | AdamW | **1e-4** | 0.01 | 40 | 1.0 | `if loss<0.01: break` |",
+    "| `theirs` (TF-Mamba gốc) | AdamW | **1e-3** | 0.01 | 40 | 1.0 | `if loss<0.01: break` |",
     "| `mine` | AdamW | 5e-4→1e-6 warmup+cosine | 1e-3 | 30 | 1.0 | tắt (MINE_EARLY_STOP=None) |",
     "",
-    "`theirs` = protocol TF-Mamba (Liu 2025): **`lr=1e-4` theo PAPER**, "
+    "`theirs` = protocol TF-Mamba (Liu 2025): **`lr=1e-3` theo CODE release**, "
     "`CrossEntropyLoss`, 40 epoch, bs 32, không scheduler, "
     "`clip_grad_norm_(max_norm=1.0)`, early-stop `if average_loss<0.01: break`, random 80/20. "
     "Các chi tiết wd=0.01 / betas / grad-clip / early-stop lấy từ **code gốc** `Mamba_HUST-HAR.py` "
-    "(paper không ghi rõ). **LƯU Ý: code release dùng lr=1e-3; ta theo PAPER (1e-4) vì đó là giá trị công bố.**",
+    "(paper không ghi rõ). **LƯU Ý: mặc định dùng lr=1e-3 theo CODE release `Mamba_HUST-HAR.py`; paper ghi 1e-4 (đổi `lr` trong make_cfg nếu muốn bản theo paper).**",
     "",
     "⚠️ **Repo public chỉ có Mamba 1-stream** (`MambaSimple.py`) — KHÔNG phải TF-Mamba "
     "dual-stream của paper (không DWT/AdaptiveFusion/proj_s3/PE/GAP trong code public). "
@@ -165,16 +165,16 @@ cells.append(code(
     "from xrf55_bench.config import TrainCfg_for_protocol",
     "",
     "def make_cfg():",
-    "    if PROTOCOL == 'theirs':   # Protocol TF-Mamba (Liu 2025) — lr theo PAPER, chi tiết khác theo CODE gốc:",
-    "        # lr=1e-4 (PAPER ghi 1e-4; code release Mamba_HUST-HAR.py dùng 1e-3 — ta theo PAPER vì",
-    "        #  đó là giá trị chính thức công bố/citable).",
+    "    if PROTOCOL == 'theirs':   # Protocol TF-Mamba (Liu 2025) — lr + chi tiết theo CODE gốc:",
+    "        # lr=1e-3 (theo code release Mamba_HUST-HAR.py; PAPER ghi 1e-4 — mac dinh dung gia tri CODE.",
+    "        #  Doi lr=1e-4 neu muon ban theo paper).",
     "        # wd=0.01, betas=(0.9,0.999), eps=1e-8 (mặc định AdamW trong code); CrossEntropyLoss;",
     "        # 40 epochs; bs=32; no scheduler; clip_grad_norm_(max_norm=1.0) (code dòng 140);",
     "        # early stopping: if average_loss < 0.01: break -> early_stop_loss=0.01; report last_model.",
     "        # wd_exclude_norm_bias=False: AdamW(model.parameters()) cua ho decay MOI param",
     "        #   (KHONG loai tru norm/bias/A_log/D/pos_emb) -> ap cho ca tfmamba lan S4.a.",
     "        return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), optimizer='adamw',",
-    "                                     lr=1e-4, weight_decay=0.01, betas=(0.9, 0.999),",
+    "                                     lr=1e-3, weight_decay=0.01, betas=(0.9, 0.999),",
     "                                     eps=1e-8, num_epochs=40, batch_size=32,",
     "                                     scheduler=None, warmup_epochs=0, grad_clip=1.0,",
     "                                     criterion='ce', label_smoothing=0.0, early_stop_loss=0.01,",
