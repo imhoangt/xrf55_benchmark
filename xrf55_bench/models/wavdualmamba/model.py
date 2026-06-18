@@ -66,8 +66,11 @@ Ablation flags:
     use_eca        — [C7] ECA channel gate on raw 27-ch input before stems (default False).
     pool_context   — [C8] full ECAPA [x‖μ‖σ] context pooling in AttnStatPool (default True).
     use_final_attn — [C6] one MHSA layer after fusion, before pooling (default False).
-    use_post_fusion_proj — [S4.a/S4.b] plain Linear(d→d) after fusion, before pooling,
-                     NO activation (= TF-Mamba's proj_s3 without the tanh; default False).
+    use_post_fusion_proj — [S4.a/S4.b/S4.c] Linear(d→d) after fusion, before pooling
+                     (default False).
+    post_fusion_proj_tanh — [S4.c] add tanh after that Linear ⇒ full TF-Mamba proj_s3
+                     head (Linear+tanh) grafted onto WavDualMamba (default False;
+                     only meaningful when use_post_fusion_proj=True).
 """
 
 from __future__ import annotations
@@ -677,6 +680,7 @@ class WavDualMamba(nn.Module):
         attn_drop: float = 0.1,
         attn_drop_path: float = 0.1,
         use_post_fusion_proj: bool = False,
+        post_fusion_proj_tanh: bool = False,
     ):
         super().__init__()
         if len(dp_mamba) != n_mamba_layers:
@@ -731,9 +735,12 @@ class WavDualMamba(nn.Module):
 
         self.eca = ECA() if use_eca else None
         self.fusion = AdaptiveFusion(d_model, self.n_branches, mode=fusion)
-        # [S4.a/S4.b] phep chieu tuyen tinh THUAN (khong activation) sau fusion, truoc
-        # pooling = "proj_s3 cua TF-Mamba nhung BO tanh". Mac dinh tat.
+        # [S4.a/S4.b] phep chieu tuyen tinh sau fusion, truoc pooling.
+        #   post_fusion_proj_tanh=False -> Linear THUAN (= proj_s3 BO tanh): S4.a/S4.b
+        #   post_fusion_proj_tanh=True  -> Linear + tanh (= FULL proj_s3 cua TF-Mamba): S4.c
+        # Mac dinh tat hoan toan.
         self.post_fusion_proj = nn.Linear(d_model, d_model) if use_post_fusion_proj else None
+        self.post_fusion_proj_tanh = post_fusion_proj_tanh
         self.final_attn = (FinalAttention(d_model, n_heads=attn_heads,
                                           attn_drop=attn_drop, drop_path=attn_drop_path)
                            if use_final_attn else None)
@@ -795,7 +802,9 @@ class WavDualMamba(nn.Module):
 
         z = self.fusion(streams)                                    # (B, T2, d_model)
         if self.post_fusion_proj is not None:
-            z = self.post_fusion_proj(z)                            # [S4.a/S4.b] Linear(d->d), khong activation
+            z = self.post_fusion_proj(z)                            # [S4.a/S4.b] Linear(d->d)
+            if self.post_fusion_proj_tanh:
+                z = torch.tanh(z)                                   # [S4.c] + tanh = full TF-Mamba proj_s3 head
         if self.final_attn is not None:
             z = self.final_attn(z)                                  # [C6] optional MHSA
         z = self.tpool(z) if self.tpool is not None else z.mean(dim=1)  # AttnStatPool or GAP
