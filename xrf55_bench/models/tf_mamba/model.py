@@ -63,6 +63,10 @@ Ablation flags (TF-Mamba → WavDualMamba; defaults = TF-Mamba baseline)
                       to test AttnStatPool without tanh clamping to [-1,1] —
                       tanh collapses temporal variance and disables AttnStatPool's
                       σ component (see analysis_s3_vs_s4.md).
+    use_pos_emb=False Drop the sinusoidal positional embedding (both streams,
+                      CNN and non-CNN paths). Default True = original behaviour.
+                      Isolates the effect of PE (e.g. rung S2.npe); Mamba already
+                      encodes order via recurrence so PE is usually redundant.
 
 Each flag swaps ONE TF-Mamba block for its WavDualMamba counterpart. Blocks are
 IMPORTED from wavdualmamba.model (not copied), so they are byte-identical, and
@@ -125,14 +129,16 @@ class EmbeddingLayer(nn.Module):
     and injects positional encodings.
     """
 
-    def __init__(self, num_features: int, embed_dim: int, max_len: int = 500):
+    def __init__(self, num_features: int, embed_dim: int, max_len: int = 500,
+                 use_pos_emb: bool = True):
         super().__init__()
-        self.pos = PositionalEmbedding(embed_dim, max_len)
+        self.pos = PositionalEmbedding(embed_dim, max_len) if use_pos_emb else None
         self.fc  = nn.Linear(num_features, embed_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, L, num_features)  →  (B, L, embed_dim)."""
-        return torch.relu(self.fc(x)) + self.pos(x)
+        h = torch.relu(self.fc(x))
+        return h + self.pos(x) if self.pos is not None else h    # PE optional (use_pos_emb)
 
 
 class CNNFrontEnd(nn.Module):
@@ -245,6 +251,7 @@ class TFMambaStream(nn.Module):
         bi_layers:    int = 2,
         bi_d_state:   int = 32,
         dp_bimamba:   tuple = (0.0, 0.10),
+        use_pos_emb:  bool = True,
     ):
         super().__init__()
         if mamba not in ('uni', 'bi'):
@@ -255,12 +262,13 @@ class TFMambaStream(nn.Module):
                 num_features, d_model, n_links=n_links, d_stem=d_stem,
                 dilations=dilations, dp_cnn=dp_cnn, embed_drop=embed_drop,
                 kernel=stem_kernel)
-            self.pos = PositionalEmbedding(d_model, max_len)
+            self.pos = PositionalEmbedding(d_model, max_len) if use_pos_emb else None
             self.emb = None
         else:
             self.frontend = None
             self.pos      = None
-            self.emb      = EmbeddingLayer(num_features, d_model, max_len)
+            self.emb      = EmbeddingLayer(num_features, d_model, max_len,
+                                           use_pos_emb=use_pos_emb)
 
         if mamba == 'bi':
             self.bimamba = BiMamba(
@@ -291,7 +299,7 @@ class TFMambaStream(nn.Module):
         """
         if self.frontend is not None:
             h = self.frontend(x)
-            x = h + self.pos(h)
+            x = h + self.pos(h) if self.pos is not None else h    # PE optional (use_pos_emb)
         else:
             x = self.emb(x)
         if self.bimamba is not None:
@@ -394,6 +402,7 @@ class TFMamba(nn.Module):
         max_len:      int = 500,
         pool:         str = 'gap',
         use_proj_s3:  bool = True,
+        use_pos_emb:  bool = True,
         use_cnn:      bool = False,
         subband_kernels: bool = True,
         mamba:        str = 'uni',
@@ -428,6 +437,7 @@ class TFMamba(nn.Module):
             bi_layers=bi_layers,
             bi_d_state=bi_d_state,
             dp_bimamba=dp_bimamba,
+            use_pos_emb=use_pos_emb,
         )
 
         # Per-stream stem kernel: when subband_kernels, hand each stream the
