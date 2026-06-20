@@ -1,6 +1,6 @@
-"""Generate xrf55_bench/notebooks/s4a_multidataset.ipynb (nbformat v4).
+"""Generate xrf55_bench/notebooks/s4nogn_multidataset.ipynb (nbformat v4).
 
-Applies a chosen MODEL (TF-Mamba original | S4.a WavDualMamba Haar 2-subband + post-fusion Linear) under a chosen
+Applies a chosen MODEL (TF-Mamba original | S4.nogn | S4.nogn_gate WavDualMamba Haar 2-subband) under a chosen
 PROTOCOL (theirs = TF-Mamba paper | mine = 02*) to HUST / UT-HAR / NTU-Fi, in one
 run. Builds the matching packed bench in-notebook from the mounted RAW Kaggle
 datasets, then sweeps DATASETS x MODES. Dataset-specifics read from stats.json.
@@ -31,7 +31,7 @@ def _src(lines):
 cells = []
 
 cells.append(md(
-    "# Multi-dataset — TF-Mamba (gốc) / S4.a WavDualMamba (Haar 2 băng + Linear post-fusion) on HUST / UT-HAR / NTU-Fi",
+    "# Multi-dataset — TF-Mamba (gốc) / S4.nogn / S4.nogn_gate WavDualMamba (Haar 2 băng) on HUST / UT-HAR / NTU-Fi",
     "",
     "Chọn **MODEL** + **PROTOCOL** ở Cell 3, chạy 1 lần cho cả 3 dataset (sweep).",
     "Notebook build packed bench ngay trong notebook từ dataset RAW đã mount.",
@@ -39,7 +39,8 @@ cells.append(md(
     "| MODEL | Mô tả |",
     "|---|---|",
     "| `tfmamba` | **TF-Mamba gốc** (paper Liu 2025): Linear embed+PE, uni-Mamba×3, AdaptiveFusion, proj_s3, GAP |",
-    "| `s4a` | WavDualMamba Haar 2 băng {HL,LH} + AttnStatPool + **Linear(64→64) post-fusion** (= ablation S4.a) |",
+    "| `s4.nogn` | WavDualMamba Haar 2 băng {HL,LH} + AttnStatPool, **bỏ GroupNorm ở SubbandStem** (= ablation S4.nogn) |",
+    "| `s4.nogn_gate` | `s4.nogn` nhưng **fusion='gate'** (per-channel) thay convex scalar (= ablation S4.nogn_gate) |",
     "",
     "| PROTOCOL | optimizer | lr | wd | epochs | grad-clip | early-stop |",
     "|---|---|---|---|---|---|---|",
@@ -63,11 +64,12 @@ cells.append(md(
     "dùng norm **SenseFi** (min-max / hằng-số) trên raw trước DWT — `author` (đúng tác giả, "
     "không z lại) hoặc `double` (SenseFi + z). Cần **build lại** UT-HAR/NTU-Fi để áp SenseFi pre-norm.",
     "",
-    "**So sánh CÔNG BẰNG `s4a` vs `tfmamba`:** `make_cfg` chỉ phụ thuộc `PROTOCOL` (KHÔNG phụ "
+    "**So sánh CÔNG BẰNG giữa các MODEL:** `make_cfg` chỉ phụ thuộc `PROTOCOL` (KHÔNG phụ "
     "thuộc MODEL); SenseFi pre-norm + split áp ở tầng build (độc lập model); z-norm per-position "
-    "áp cho cả hai. → chạy 2 lần cùng `PROTOCOL`/`NORM_MODE`/`MERGE_VAL`/`SEEDS`, chỉ đổi `MODEL` "
-    "= **protocol + chia dataset + chuẩn hoá GIỐNG HỆT**, khác duy nhất là **kiến trúc model**. "
-    "Mỗi run lưu thư mục riêng theo `RUN_TAG` nên không ghi đè.",
+    "áp cho tất cả. → chạy nhiều lần cùng `PROTOCOL`/`NORM_MODE`/`MERGE_VAL`/`SEEDS`, chỉ đổi `MODEL` "
+    "(`tfmamba` / `s4.nogn` / `s4.nogn_gate`) = **protocol + chia dataset + chuẩn hoá GIỐNG HỆT**, "
+    "khác duy nhất là **kiến trúc model** (giữa hai s4 chỉ khác `fusion` convex↔gate). "
+    "Mỗi run lưu thư mục riêng theo `MODEL`+`RUN_TAG` nên không ghi đè.",
     "",
     "**Trước khi chạy:** Add Input 3 dataset RAW (`hust_dataset`, `ut_har_dataset`, "
     "`ntu_fi_dataset`) + bật **GPU**.",
@@ -105,7 +107,7 @@ cells.append(code(
     "# Cell 3 — Configuration",
     "from pathlib import Path",
     "",
-    "MODEL    = 'tfmamba'   # 'tfmamba' (gốc) | 's4a' (WavDualMamba Haar 2 băng {HL,LH} + Linear post-fusion = ablation S4.a)",
+    "MODEL    = 's4.nogn'   # 'tfmamba' (gốc) | 's4.nogn' (S4 bỏ stem GroupNorm) | 's4.nogn_gate' (S4.nogn + fusion gate per-channel)",
     "PROTOCOL = 'theirs'    # 'theirs' (TF-Mamba paper) | 'mine' (02*)",
     "NORM_MODE = 'double'   # 'author' (UT-HAR/NTU-Fi dùng norm SenseFi, đúng tác giả) | 'double' (+ z-norm)",
     "MERGE_VAL = True       # CHI UT-HAR: False=git SenseFi (test=X_test) | True=gộp val vào test",
@@ -118,8 +120,9 @@ cells.append(code(
     "",
     "DIRMAP  = {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}",
     "_MARKER = {'hust': 'HUST_HAR_labels.pt', 'uthar': 'X_train.csv', 'ntufi': 'train_amp'}",
+    "assert MODEL in ('tfmamba', 's4.nogn', 's4.nogn_gate'), f'MODEL khong hop le: {MODEL!r}'",
     "FORMAT  = 'tfmamba' if MODEL == 'tfmamba' else 'wavmamba'   # build layout per model",
-    "WAV_SUBS = 'HL,LH' if MODEL == 's4a' else 'LL,HL,LH'   # s4a = Haar 2 bang (no LL); chi dung khi FORMAT=wavmamba",
+    "WAV_SUBS = 'HL,LH'   # ca s4.nogn lan s4.nogn_gate deu Haar 2 bang {HL,LH} (no LL); chi dung khi FORMAT=wavmamba",
     "RUN_TAG = f'{PROTOCOL}_{NORM_MODE}' + ('_mv' if MERGE_VAL else '')   # phan biet run, tranh ghi de",
     "build_py = CODE_PATH / 'xrf55_bench' / 'scripts' / '10_build_multi.py'",
     "",
@@ -146,10 +149,13 @@ cells.append(code(
     "    _m = TFMamba(num_features=135, d_model=64, num_layers=3, num_classes=6, max_len=500).to(dev)",
     "    with torch.no_grad():",
     "        _o = _m(torch.randn(2, 500, 135, device=dev), torch.randn(2, 500, 135, device=dev))",
-    "else:   # s4a = S4 (Haar 2 bang {HL,LH}, AttnStat) + Linear(64->64) post-fusion -> packed C = 18 (HUST)",
+    "else:   # s4.nogn / s4.nogn_gate = WavDualMamba Haar 2 bang {HL,LH}, AttnStat, bo stem GroupNorm -> packed C = 18",
     "    from xrf55_bench.models.wavdualmamba.model import WavDualMamba",
-    "    _m = WavDualMamba(num_classes=6, n_links=1, n_antennas=9, f2=15,",
-    "                      subbands=('HL', 'LH'), pool='attnstat', use_post_fusion_proj=True).to(dev)",
+    "    _mk = dict(num_classes=6, n_links=1, n_antennas=9, f2=15,",
+    "               subbands=('HL', 'LH'), pool='attnstat', stem_norm=False)",
+    "    if MODEL == 's4.nogn_gate':",
+    "        _mk['fusion'] = 'gate'",
+    "    _m = WavDualMamba(**_mk).to(dev)",
     "    with torch.no_grad():",
     "        _o = _m(torch.randn(2, 18, 16, 15, device=dev))",
     "assert _o.shape == (2, 6), f'bad output {tuple(_o.shape)}'",
@@ -172,7 +178,7 @@ cells.append(code(
     "        # 40 epochs; bs=32; no scheduler; clip_grad_norm_(max_norm=1.0) (code dòng 140);",
     "        # early stopping: if average_loss < 0.01: break -> early_stop_loss=0.01; report last_model.",
     "        # wd_exclude_norm_bias=False: AdamW(model.parameters()) cua ho decay MOI param",
-    "        #   (KHONG loai tru norm/bias/A_log/D/pos_emb) -> ap cho ca tfmamba lan S4.a.",
+    "        #   (KHONG loai tru norm/bias/A_log/D/pos_emb) -> ap cho ca tfmamba lan s4.nogn*.",
     "        return TrainCfg_for_protocol('02', seeds=tuple(SEEDS), optimizer='adamw',",
     "                                     lr=1e-3, weight_decay=0.01, betas=(0.9, 0.999),",
     "                                     eps=1e-8, num_epochs=40, batch_size=32,",
@@ -189,9 +195,11 @@ cells.append(code(
     "    F2, nps, T2 = meta['F2'], meta['n_per_sub'], meta['T2']",
     "    if MODEL == 'tfmamba':",
     "        return 'tfmamba', {'num_features': nps * F2, 'max_len': T2}",
-    "    return 'wavdualmamba', {'n_links': 1, 'n_antennas': nps, 'f2': F2,",
-    "                            'subbands': ('HL', 'LH'), 'pool': 'attnstat',",
-    "                            'use_post_fusion_proj': True}   # s4a = S4 + Linear(64->64) post-fusion",
+    "    mk = {'n_links': 1, 'n_antennas': nps, 'f2': F2,",
+    "          'subbands': ('HL', 'LH'), 'pool': 'attnstat', 'stem_norm': False}",
+    "    if MODEL == 's4.nogn_gate':",
+    "        mk['fusion'] = 'gate'   # per-channel gate thay convex scalar (= S4.nogn_gate)",
+    "    return 'wavdualmamba', mk",
     "",
     "def run_one(ds, md):",
     "    raw   = resolve_mount(ds)",
@@ -199,7 +207,7 @@ cells.append(code(
     "    out   = Path(f'{OUT_ROOT}/outputs/{MODEL}_{ds}_{md}_{RUN_TAG}')",
     "    cmd = [sys.executable, str(build_py), '--dataset', ds, '--mode', md,",
     "           '--raw-root', raw, '--out-root', OUT_ROOT, '--format', FORMAT]",
-    "    if FORMAT == 'wavmamba': cmd += ['--wav-subbands', WAV_SUBS]   # s4a -> 'HL,LH'",
+    "    if FORMAT == 'wavmamba': cmd += ['--wav-subbands', WAV_SUBS]   # s4.nogn* -> 'HL,LH'",
     "    if MERGE_VAL: cmd.append('--merge-val')",
     "    subprocess.run(cmd, check=True)",
     "    meta = json.load(open(bench / 'stats.json'))['meta']",
@@ -233,20 +241,26 @@ cells.append(code(
     "from pathlib import Path",
     "from IPython.display import FileLink, display",
     "",
+    "# Duyet ĐUNG cac thu muc cua MODEL nay (path chinh xac, tranh glob bat nham",
+    "# 's4.nogn_gate' khi MODEL='s4.nogn' — 's4.nogn' la tien to cua 's4.nogn_gate').",
+    "run_dirs = [Path(f'{OUT_ROOT}/outputs/{MODEL}_{ds}_{md}_{RUN_TAG}')",
+    "            for ds in DATASETS for md in MODES]",
+    "",
     "print('--- Results ---')",
-    "for d in sorted(Path('/kaggle/working/outputs').glob(f'{MODEL}_*_{RUN_TAG}')):",
+    "for d in run_dirs:",
     "    mp = d / 'metrics.json'",
     "    if not mp.exists():",
     "        continue",
     "    m = json.load(open(mp)); s = m['summary']",
     "    last = f\"{s['test_accuracy_mean']*100:.2f}±{s['test_accuracy_std']*100:.2f}\"",
     "    best = f\"{s.get('best_test_acc_mean',0)*100:.2f}±{s.get('best_test_acc_std',0)*100:.2f}\"",
-    "    print(f\"  {d.name:<28} last={last}  best={best}  F1={s['test_f1_macro_mean']*100:.2f}\")",
+    "    print(f\"  {d.name:<34} last={last}  best={best}  F1={s['test_f1_macro_mean']*100:.2f}\")",
     "",
     "print('\\n--- Zips ---')",
-    "for z in sorted(Path('/kaggle/working/outputs').rglob('*.zip')):",
-    "    shutil.copy2(z, Path('/kaggle/working') / z.name)",
-    "    print(z.name); display(FileLink(z.name))",
+    "for d in run_dirs:",
+    "    for z in sorted(d.glob('*.zip')):",
+    "        shutil.copy2(z, Path('/kaggle/working') / z.name)",
+    "        print(z.name); display(FileLink(z.name))",
 ))
 
 nb = {
@@ -260,6 +274,6 @@ nb = {
     "nbformat_minor": 5,
 }
 
-out = Path(__file__).parent.parent / 'notebooks' / 's4a_multidataset.ipynb'
+out = Path(__file__).parent.parent / 'notebooks' / 's4nogn_multidataset.ipynb'
 json.dump(nb, open(out, 'w', encoding='utf-8'), indent=1, ensure_ascii=False)
 print(f'wrote {out}  ({len(cells)} cells)')
