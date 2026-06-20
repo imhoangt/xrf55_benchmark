@@ -71,6 +71,9 @@ Ablation flags:
     post_fusion_proj_tanh — [S4.c] add tanh after that Linear ⇒ full TF-Mamba proj_s3
                      head (Linear+tanh) grafted onto WavDualMamba (default False;
                      only meaningful when use_post_fusion_proj=True).
+    stem_norm=False  [S4.nogn] Drop the GroupNorm inside SubbandStem (stem becomes
+                     Conv→SiLU); the TFBlock pre-norm GN still normalises right after.
+                     Default True = original behaviour.
 """
 
 from __future__ import annotations
@@ -148,16 +151,16 @@ class SubbandStem(nn.Module):
     """Conv2d(in_ch → d_stem) + GroupNorm + SiLU, one per subband."""
 
     def __init__(self, in_ch: int, d_stem: int = 16, kernel=(5, 5),
-                 temporal_stride: int = 1):
+                 temporal_stride: int = 1, norm: bool = True):
         super().__init__()
         kt, kf = kernel
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, d_stem, (kt, kf),
-                      stride=(temporal_stride, 1),
-                      padding=(kt // 2, kf // 2)),
-            nn.GroupNorm(_gn_groups(d_stem), d_stem),
-            nn.SiLU(),
-        )
+        layers = [nn.Conv2d(in_ch, d_stem, (kt, kf),
+                            stride=(temporal_stride, 1),
+                            padding=(kt // 2, kf // 2))]
+        if norm:                                        # norm=False -> bo GN cua stem (rung S4.nogn)
+            layers.append(nn.GroupNorm(_gn_groups(d_stem), d_stem))
+        layers.append(nn.SiLU())
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -681,6 +684,7 @@ class WavDualMamba(nn.Module):
         attn_drop_path: float = 0.1,
         use_post_fusion_proj: bool = False,
         post_fusion_proj_tanh: bool = False,
+        stem_norm: bool = True,
     ):
         super().__init__()
         if len(dp_mamba) != n_mamba_layers:
@@ -708,7 +712,7 @@ class WavDualMamba(nn.Module):
         self.temporal_stride = temporal_stride
         self.stems = nn.ModuleDict({
             s: SubbandStem(self.n_per_sub, d_stem, kernel=_SUBBAND_KERNEL[s],
-                           temporal_stride=temporal_stride)
+                           temporal_stride=temporal_stride, norm=stem_norm)
             for s in self.subbands
         })
 
