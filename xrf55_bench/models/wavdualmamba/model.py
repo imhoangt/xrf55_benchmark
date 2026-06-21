@@ -34,7 +34,8 @@ Input  : X (B, 27, T2, F2), subband-major channels
 
 Per-branch (one per SELECTED subband s):
     subband_s (B, M*A, T2, F2)
-      → Stem_s         per-subband conv (LL/HL/LH kernel) + GN + SiLU
+      → Stem_s         per-subband conv (LL/HL/LH kernel) + [GN] + SiLU
+                       (GroupNorm dropped by default since 2026-06; stem_norm=True restores it)
                        [temporal_stride=2 → T2 500→250]
       → TFBlock×3      dilation [1,2,4] → RF 7→19→43 timesteps (drop_path 0.0,0.05,0.1)
       → [FreqMix]      optional nonlinear subcarrier mix (freq_mix='mlp')
@@ -54,9 +55,10 @@ Ablation flags:
                      {HL,LH} {LL,HL} {LL,LH} {LL,HL,LH}.
     share_branches — tie the TFBlock+embed+BiMamba across subbands (stems stay
                      per-subband). Default False (separate, more expressive).
-    fusion         — 'convex' | 'gate' | 'concat' branch-merge (default 'convex'
-                     = baseline). 'gate' = per-channel convex routing; 'concat'
-                     = static full-matrix mix. See AdaptiveFusion.
+    fusion         — 'convex' | 'gate' | 'concat' branch-merge (default 'gate'
+                     since 2026-06; 'convex' = TF-Mamba baseline). 'gate' =
+                     per-channel convex routing; 'concat' = static full-matrix
+                     mix. See AdaptiveFusion.
     use_pos_emb    — sinusoidal absolute PE (default False; Mamba encodes order
                      via its recurrence, so PE is usually redundant here).
     bidirectional  — backward Mamba branch + gate (default True).
@@ -71,9 +73,10 @@ Ablation flags:
     post_fusion_proj_tanh — [S4.c] add tanh after that Linear ⇒ full TF-Mamba proj_s3
                      head (Linear+tanh) grafted onto WavDualMamba (default False;
                      only meaningful when use_post_fusion_proj=True).
-    stem_norm=False  [S4.nogn] Drop the GroupNorm inside SubbandStem (stem becomes
-                     Conv→SiLU); the TFBlock pre-norm GN still normalises right after.
-                     Default True = original behaviour.
+    stem_norm        [S4.nogn] Keep/drop the GroupNorm inside SubbandStem. False
+                     (default since 2026-06) ⇒ stem = Conv→SiLU (no GroupNorm);
+                     the TFBlock pre-norm GN still normalises right after. True =
+                     original behaviour (GroupNorm in the stem).
 """
 
 from __future__ import annotations
@@ -615,9 +618,10 @@ class WavDualMamba(nn.Module):
                          run in ONE batched backbone call (≈ N× throughput).
         fusion         : 'convex' | 'gate' | 'concat' — how the N branch streams
                          are merged (all (B,T,d)→(B,T,d), zero-init → mean at
-                         step 0). 'convex' = per-branch scalar (default, baseline);
-                         'gate' = per-channel convex routing; 'concat' = static
-                         full-matrix mix. See AdaptiveFusion.
+                         step 0). 'gate' = per-channel convex routing (default
+                         since 2026-06); 'convex' = per-branch scalar (TF-Mamba
+                         baseline); 'concat' = static full-matrix mix.
+                         See AdaptiveFusion.
         freq_mix       : None | 'mlp' — nonlinear subcarrier mix before flatten.
         expand         : Mamba inner-expansion factor (default 2, capacity knob).
         d_conv         : Mamba local conv1d width (default 4).
@@ -667,7 +671,7 @@ class WavDualMamba(nn.Module):
         bidirectional: bool = True,
         use_pos_emb: bool = False,
         share_branches: bool = False,
-        fusion: str = 'convex',
+        fusion: str = 'gate',
         freq_mix: str = None,
         expand: int = 2,
         d_conv: int = 4,
@@ -684,7 +688,7 @@ class WavDualMamba(nn.Module):
         attn_drop_path: float = 0.1,
         use_post_fusion_proj: bool = False,
         post_fusion_proj_tanh: bool = False,
-        stem_norm: bool = True,
+        stem_norm: bool = False,
     ):
         super().__init__()
         if len(dp_mamba) != n_mamba_layers:

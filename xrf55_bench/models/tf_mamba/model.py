@@ -67,6 +67,12 @@ Ablation flags (TF-Mamba → WavDualMamba; defaults = TF-Mamba baseline)
                       CNN and non-CNN paths). Default True = original behaviour.
                       Isolates the effect of PE (e.g. rung S2.npe); Mamba already
                       encodes order via recurrence so PE is usually redundant.
+    stem_norm=False   Drop the GroupNorm inside the CNN front-end's SubbandStem
+                      (only with use_cnn=True) → matches the finalized WavDualMamba
+                      stem (nogn). Grafted alongside the CNN in rungs S1/S2/S3.
+    fusion='gate'     Replace the paper-faithful 2-stream softmax fusion with
+                      WavDualMamba's per-channel gate (reused AdaptiveFusion).
+                      Grafted alongside the gated BiMamba in rungs S1.1/S2/S3.
 
 Each flag swaps ONE TF-Mamba block for its WavDualMamba counterpart. Blocks are
 IMPORTED from wavdualmamba.model (not copied), so they are byte-identical, and
@@ -89,6 +95,7 @@ except ImportError as _e:
 
 from xrf55_bench.models.wavdualmamba.model import (
     AttnStatPool, BiMamba, SubbandStem, TFBlock, _SUBBAND_KERNEL,
+    AdaptiveFusion as WavAdaptiveFusion,   # per-channel 'gate'/'concat' fusion (S2+)
 )
 
 
@@ -166,7 +173,7 @@ class CNNFrontEnd(nn.Module):
     def __init__(self, num_features: int, d_model: int, n_links: int = 9,
                  d_stem: int = 16, dilations: tuple = (1, 2, 4),
                  dp_cnn: tuple = (0.0, 0.05, 0.1), embed_drop: float = 0.1,
-                 kernel: tuple = (5, 5)):
+                 kernel: tuple = (5, 5), stem_norm: bool = True):
         super().__init__()
         if num_features % n_links != 0:
             raise ValueError(
@@ -176,7 +183,7 @@ class CNNFrontEnd(nn.Module):
                 f"len(dp_cnn)={len(dp_cnn)} must equal len(dilations)={len(dilations)}")
         self.n_links = n_links
         self.f2      = num_features // n_links
-        self.stem    = SubbandStem(n_links, d_stem, kernel=kernel)
+        self.stem    = SubbandStem(n_links, d_stem, kernel=kernel, norm=stem_norm)
         self.blocks  = nn.ModuleList([
             TFBlock(d_stem, dilation=dilations[i], drop_path=dp_cnn[i])
             for i in range(len(dilations))
@@ -252,6 +259,7 @@ class TFMambaStream(nn.Module):
         bi_d_state:   int = 32,
         dp_bimamba:   tuple = (0.0, 0.10),
         use_pos_emb:  bool = True,
+        stem_norm:    bool = True,
     ):
         super().__init__()
         if mamba not in ('uni', 'bi'):
@@ -261,7 +269,7 @@ class TFMambaStream(nn.Module):
             self.frontend = CNNFrontEnd(
                 num_features, d_model, n_links=n_links, d_stem=d_stem,
                 dilations=dilations, dp_cnn=dp_cnn, embed_drop=embed_drop,
-                kernel=stem_kernel)
+                kernel=stem_kernel, stem_norm=stem_norm)
             self.pos = PositionalEmbedding(d_model, max_len) if use_pos_emb else None
             self.emb = None
         else:
@@ -384,6 +392,14 @@ class TFMamba(nn.Module):
     mamba        : 'uni' (baseline) | 'bi'
                    Swaps the whole Mamba stack for WavDualMamba's gated
                    BiMamba (bi_layers=2, bi_d_state=32, final RMSNorm).
+    stem_norm    : True (baseline) | False
+                   Only with use_cnn=True. False drops the GroupNorm inside the
+                   CNN front-end's SubbandStem (stem = Conv->SiLU), matching the
+                   finalized WavDualMamba stem (nogn). No effect without use_cnn.
+    fusion       : 'convex' (baseline) | 'gate' | 'concat'
+                   'convex' = paper-faithful 2-stream softmax (local class).
+                   'gate' = WavDualMamba's per-channel convex routing; 'concat'
+                   = static full-matrix mix (both reuse WavDualMamba.AdaptiveFusion).
     n_links, d_stem, dilations, dp_cnn, embed_drop   : CNNFrontEnd knobs
     bi_layers, bi_d_state, dp_bimamba                : BiMamba knobs
     Flags compose freely — see notebooks/ablation_ladder.ipynb for the
@@ -414,6 +430,8 @@ class TFMamba(nn.Module):
         bi_layers:    int = 2,
         bi_d_state:   int = 32,
         dp_bimamba:   tuple = (0.0, 0.10),
+        stem_norm:    bool = True,
+        fusion:       str = 'convex',
     ):
         super().__init__()
         if pool not in ('gap', 'attnstat'):
@@ -438,6 +456,7 @@ class TFMamba(nn.Module):
             bi_d_state=bi_d_state,
             dp_bimamba=dp_bimamba,
             use_pos_emb=use_pos_emb,
+            stem_norm=stem_norm,
         )
 
         # Per-stream stem kernel: when subband_kernels, hand each stream the
@@ -455,8 +474,17 @@ class TFMamba(nn.Module):
         # Freq-Mamba stream — XV = LH (vertical-detail DWT subband)
         self.stream_F = TFMambaStream(**shared_kwargs, stem_kernel=kF)
 
-        # Adaptive fusion  [Eq. 15]
-        self.fusion = AdaptiveFusion(d_model)
+        # Adaptive fusion  [Eq. 15].
+        #   'convex'        -> local paper-faithful class (Linear 2D->2 softmax),
+        #                      byte-identical to the TF-Mamba baseline; called (ST, SF).
+        #   'gate'/'concat' -> reuse WavDualMamba's AdaptiveFusion (per-channel gate),
+        #                      n_branches=2; called with a list [S_T, S_F].
+        if fusion == 'convex':
+            self.fusion = AdaptiveFusion(d_model)
+            self._fusion_list = False
+        else:
+            self.fusion = WavAdaptiveFusion(d_model, 2, mode=fusion)
+            self._fusion_list = True
 
         # proj_s3: S2 → S3 with tanh (D′ = D = 64, confirmed by Table I).
         # use_proj_s3=False bypasses this for fair AttnStatPool ablations.
@@ -492,7 +520,8 @@ class TFMamba(nn.Module):
         S_F = self.stream_F(XV)              # (B, L, d_model)
 
         # ── Step 2: sequence-level adaptive fusion [Eq. 15] ──────────────────
-        S2 = self.fusion(S_T, S_F)           # (B, L, d_model)
+        S2 = (self.fusion([S_T, S_F]) if self._fusion_list
+              else self.fusion(S_T, S_F))    # (B, L, d_model)
 
         # ── Step 3: proj_s3 + tanh (paper-faithful; skipped when use_proj_s3=False) ──
         h = torch.tanh(self.proj_s3(S2)) if self.proj_s3 is not None else S2
