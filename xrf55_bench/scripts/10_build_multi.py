@@ -204,7 +204,7 @@ def _finalize(s, s2, n):
 
 
 def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
-          merge_val=False, wav_subs=('LL', 'HL', 'LH')):
+          merge_val=False, wav_subs=('LL', 'HL', 'LH'), norm_style='sensefi'):
     """raw_root: where the raw dataset lives (default local dataset/<DIR>; on Kaggle
     pass the mounted dataset path). out_root: where bench/ is written.
     fmt: 'wavmamba' (packed [subbands] for WavDualMamba) | 'tfmamba' (2-stream
@@ -212,11 +212,18 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
     wav_subs: which Haar subbands to pack for the wavmamba format, IN ORDER:
       ('LL','HL','LH') = S4.1 (3 bang, mac dinh) | ('HL','LH') = S4 (2 bang, no LL).
       Chi anh huong fmt wavmamba; thu tu nay = subband order model phai khop.
-    merge_val: CHI UT-HAR — True thi gop X_val vao test (mac dinh False = git SenseFi)."""
+    merge_val: CHI UT-HAR — True thi gop X_val vao test (mac dinh False = git SenseFi).
+    norm_style: 'sensefi' (mac dinh) = SenseFi pre-norm (uthar/ntufi) + z-norm
+      per-position (C,T2,F2)/(T2,M). 'xrf55' = KHONG pre-norm (moi dataset) + z-norm
+      per-channel-bin (C,F2)/(M,) gop truc thoi gian — giong het build XRF55 (02).
+      z-norm ap luc load; pre-norm bi nuong vao X_*.npy nen 2 style KHONG dung chung bench."""
     _VALID = ('LL', 'HL', 'LH')
     wav_subs = tuple(wav_subs)
     if not wav_subs or any(s not in _VALID for s in wav_subs):
         raise ValueError(f'wav_subs phai la tap con co thu tu cua {_VALID}, got {wav_subs}')
+    if norm_style not in ('sensefi', 'xrf55'):
+        raise ValueError(f"norm_style phai la 'sensefi' | 'xrf55', got {norm_style!r}")
+    per_channel_bin = (norm_style == 'xrf55')   # xrf55: z-norm gop truc thoi gian
     cfg = DATASETS[dataset]
     do_filter = (mode == 'proc')
     n_ant, sub, n_per_sub, fs = cfg['n_ant'], cfg['sub'], cfg['n_per_sub'], cfg['fs']
@@ -232,9 +239,13 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
         X, y, splits = cfg['loader'](raw_root)
     N, AxS, time = X.shape
     assert AxS == n_ant * sub, f'axis1 {AxS} != n_ant*sub {n_ant*sub}'
-    X, prenorm = _sensefi_prenorm(dataset, X, splits)   # SenseFi raw norm (uthar/ntufi)
-    if prenorm:
-        print(f'  SenseFi pre-norm (raw, before DWT) applied for {dataset}')
+    if norm_style == 'xrf55':
+        prenorm = False        # xrf55: KHONG pre-norm cho bat ky dataset nao
+        print(f'  norm_style=xrf55: SKIP SenseFi pre-norm for {dataset}')
+    else:
+        X, prenorm = _sensefi_prenorm(dataset, X, splits)   # SenseFi raw norm (uthar/ntufi)
+        if prenorm:
+            print(f'  SenseFi pre-norm (raw, before DWT) applied for {dataset}')
     C, T2, F2 = len(wav_subs) * n_per_sub, time // 2, sub // 2   # C = #subbands * n_per_sub
     M = n_per_sub * F2                      # tfmamba flat feature dim (= n_ant*sub//2)
     print(f'  N={N}  raw=({AxS},{time})  fmt={fmt}  wav_subs={wav_subs}  '
@@ -242,7 +253,10 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
     print(f'  mode={mode}  do_filter={do_filter}  fs={fs}  classes={cfg["classes"]}')
     print(f'  split: ' + '  '.join(f'{k}={len(v)}' for k, v in splits.items()))
 
-    out_dir = base_out / 'bench' / mode
+    # sensefi giu nguyen bench/{mode} (tuong thich run cu); xrf55 -> bench/{mode}_xrf55
+    # de build gate (xrf55) KHONG de len build sensefi ma tfmamba/s4.nogn doc.
+    mode_sub = mode if norm_style == 'sensefi' else f'{mode}_{norm_style}'
+    out_dir = base_out / 'bench' / mode_sub
     out_dir.mkdir(parents=True, exist_ok=True)
     for sp, idx in splits.items():
         np.save(out_dir / f'y_{sp}.npy', y[idx].astype(np.int64))
@@ -253,19 +267,21 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
         mm = {sp: np.lib.format.open_memmap(str(out_dir / 'wavmamba' / f'X_{sp}.npy'),
               mode='w+', dtype=np.float32, shape=(len(idx), C, T2, F2))
               for sp, idx in splits.items()}
-        # S4.1 cung PER-POSITION (C,T2,F2) de cong bang voi tfmamba goc (cung per-position).
-        # XRF55 (02 build) van per-channel-bin (C,F2). Dataset tu nhan-biet-shape.
-        s = np.zeros((C, T2, F2)); s2 = np.zeros((C, T2, F2)); n_wav = np.int64(0)
+        # sensefi: PER-POSITION (C,T2,F2) de cong bang voi tfmamba goc (cung per-position).
+        # xrf55: PER-CHANNEL-BIN (C,F2) gop truc thoi gian, giong het build XRF55 (02).
+        _wsh = (C, F2) if per_channel_bin else (C, T2, F2)
+        s = np.zeros(_wsh); s2 = np.zeros(_wsh); n_wav = np.int64(0)
     if do_tf:
         (out_dir / 'tfmamba').mkdir(exist_ok=True)
         xh_mm = {sp: np.lib.format.open_memmap(str(out_dir / 'tfmamba' / f'X_{sp}_xh.npy'),
                  mode='w+', dtype=np.float32, shape=(len(idx), T2, M)) for sp, idx in splits.items()}
         xv_mm = {sp: np.lib.format.open_memmap(str(out_dir / 'tfmamba' / f'X_{sp}_xv.npy'),
                  mode='w+', dtype=np.float32, shape=(len(idx), T2, M)) for sp, idx in splits.items()}
-        # tfmamba (model goc) chuan hoa PER-POSITION (T2,M) = data_norm cua git TF-Mamba
-        # (khac wavmamba/S4.1 dung per-channel-bin). XRF55 (01/02) van dung (M,) per-feature.
-        hs = np.zeros((T2, M)); hs2 = np.zeros((T2, M))
-        vs = np.zeros((T2, M)); vs2 = np.zeros((T2, M)); n_tf = np.int64(0)
+        # sensefi: PER-POSITION (T2,M) = data_norm cua git TF-Mamba.
+        # xrf55: PER-FEATURE (M,) gop truc thoi gian, giong build XRF55 (01/02).
+        _tsh = (M,) if per_channel_bin else (T2, M)
+        hs = np.zeros(_tsh); hs2 = np.zeros(_tsh)
+        vs = np.zeros(_tsh); vs2 = np.zeros(_tsh); n_tf = np.int64(0)
 
     for sp, idx in splits.items():
         for j, i in enumerate(tqdm(idx, desc=f'  [{sp}] {fmt}', unit='smp')):
@@ -275,12 +291,20 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
                 x = np.concatenate([to_maps(_sb[s], n_per_sub) for s in wav_subs],
                                    axis=0).astype(np.float32, copy=False)
                 mm[sp][j] = x
-                xd = x.astype(np.float64); s += xd; s2 += xd * xd; n_wav += 1   # per-position (C,T2,F2)
+                xd = x.astype(np.float64)
+                if per_channel_bin:                       # gop truc thoi gian -> (C,F2)
+                    s += xd.sum(axis=1); s2 += (xd * xd).sum(axis=1); n_wav += T2
+                else:                                     # per-position (C,T2,F2)
+                    s += xd; s2 += xd * xd; n_wav += 1
             if do_tf:
                 xh_mm[sp][j] = HL; xv_mm[sp][j] = LH
                 hd = HL.astype(np.float64); vd = LH.astype(np.float64)
-                hs += hd; hs2 += hd * hd          # per-position (T2,M): cong don qua samples
-                vs += vd; vs2 += vd * vd; n_tf += 1
+                if per_channel_bin:                       # gop truc thoi gian -> (M,)
+                    hs += hd.sum(axis=0); hs2 += (hd * hd).sum(axis=0)
+                    vs += vd.sum(axis=0); vs2 += (vd * vd).sum(axis=0); n_tf += T2
+                else:                                     # per-position (T2,M)
+                    hs += hd; hs2 += hd * hd
+                    vs += vd; vs2 += vd * vd; n_tf += 1
 
     meta = dict(dataset=dataset, mode=mode, fs=fs, do_filter=do_filter,
                 n_ant=n_ant, sub=sub, n_per_sub=n_per_sub, C=C, T2=T2, F2=F2, M=M,
@@ -290,6 +314,7 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
                        if (dataset == 'uthar' and merge_val) else SPLIT_DESC[dataset]),
                 merge_val=(merge_val if dataset == 'uthar' else None),
                 subband_order='|'.join(wav_subs), norm='all-reps',
+                norm_style=norm_style,     # 'sensefi' | 'xrf55' (no pre-norm + per-channel-bin z)
                 sensefi_prenorm=prenorm,   # True cho uthar/ntufi: z-norm load-time bo qua khi norm_mode='author'
                 source=('multi_hampel_lpf' if do_filter else 'multi_raw'))
     if do_filter:
@@ -297,15 +322,15 @@ def build(dataset: str, mode: str, raw_root=None, out_root=None, fmt='wavmamba',
                               lpf_order=4, lpf_cutoff_hz=20.0)
     stats = {'meta': meta}
     if do_wav:
-        mean, std = _finalize(s, s2, n_wav)            # (C,T2,F2) per-position
+        mean, std = _finalize(s, s2, n_wav)            # xrf55:(C,F2) | sensefi:(C,T2,F2)
         stats['wavmamba'] = {'mean': mean, 'std': std}
-        meta['wavmamba_norm'] = 'per-position'         # (C,T2,F2); XRF55 builds = per-channel-bin (C,F2)
+        meta['wavmamba_norm'] = 'per-channel-bin' if per_channel_bin else 'per-position'
     if do_tf:
         xh_m, xh_s = _finalize(hs, hs2, n_tf)          # (T2,M) per-position (data_norm)
         xv_m, xv_s = _finalize(vs, vs2, n_tf)
         stats['tfmamba'] = {'xh_mean': xh_m, 'xh_std': xh_s, 'xv_mean': xv_m, 'xv_std': xv_s}
         meta['tfmamba_subband_naming'] = 'paper-eq5'   # xh file holds HL content
-        meta['tfmamba_norm'] = 'per-position'          # (T2,M) data_norm; XRF55 builds = per-feature (M,)
+        meta['tfmamba_norm'] = 'per-feature' if per_channel_bin else 'per-position'
     with open(out_dir / 'stats.json', 'w') as f:
         json.dump(stats, f)
     for d in (mm, xh_mm, xv_mm):
@@ -329,7 +354,11 @@ if __name__ == '__main__':
                     help='wavmamba pack: "LL,HL,LH"=S4.1 (3 bang) | "HL,LH"=S4 (2 bang, no LL)')
     ap.add_argument('--merge-val', action='store_true',
                     help='CHI UT-HAR: gop X_val vao test (mac dinh khong, giong git SenseFi)')
+    ap.add_argument('--norm-style', default='sensefi', choices=['sensefi', 'xrf55'],
+                    help='sensefi=SenseFi pre-norm+z per-position (mac dinh) | '
+                         'xrf55=KHONG pre-norm + z per-channel-bin (giong build XRF55)')
     args = ap.parse_args()
     wav_subs = tuple(s.strip() for s in args.wav_subbands.split(',') if s.strip())
     build(args.dataset, args.mode, raw_root=args.raw_root, out_root=args.out_root,
-          fmt=args.format, merge_val=args.merge_val, wav_subs=wav_subs)
+          fmt=args.format, merge_val=args.merge_val, wav_subs=wav_subs,
+          norm_style=args.norm_style)
