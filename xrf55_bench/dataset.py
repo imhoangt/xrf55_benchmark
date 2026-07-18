@@ -100,14 +100,14 @@ class PreprocTFMambaDataset(Dataset):
     with its own tfmamba stats before the (symmetric) reorder.
     """
 
-    def __init__(self, bench_dir: Path, split: str, stats: dict, norm_mode: str = 'double'):
+    def __init__(self, bench_dir: Path, split: str, stats: dict):
         bench_dir = Path(bench_dir)
         self.XH = np.load(bench_dir / 'tfmamba' / f'X_{split}_xh.npy', mmap_mode='r')  # (N, 500, 135)
         self.XV = np.load(bench_dir / 'tfmamba' / f'X_{split}_xv.npy', mmap_mode='r')  # (N, 500, 135)
         self.y  = np.load(bench_dir / f'y_{split}.npy')
         s = stats['tfmamba']
-        # Stats co the la (M,) per-feature [XRF55 builds] hoac (T2,M) per-position
-        # [multi-dataset = data_norm cua git TF-Mamba]. Dua ve dang broadcast duoc
+        # Stats co the la (M,) per-feature [z_gran=pcb] hoac (T2,M) per-position
+        # [z_gran=perpos = data_norm cua git TF-Mamba]. Dua ve dang broadcast duoc
         # voi (T2,M): (M,) -> (1,M); (T2,M) -> giu nguyen.
         def _bcast(a):
             a = np.array(a, dtype=np.float32)
@@ -115,19 +115,16 @@ class PreprocTFMambaDataset(Dataset):
         self.xh_mean = _bcast(s['xh_mean']); self.xh_std = _bcast(s['xh_std'])
         self.xv_mean = _bcast(s['xv_mean']); self.xv_std = _bcast(s['xv_std'])
         self._hl_is_xh = _tfmamba_hl_is_xh(stats)
-        # norm_mode='author': UT-HAR/NTU-Fi chi SenseFi pre-norm (build), KHONG z-norm
-        # lai. Chi bo z khi build co SenseFi pre-norm (uthar/ntufi); HUST/XRF55 luon z.
-        self._skip_z = (norm_mode == 'author'
-                        and stats.get('meta', {}).get('sensefi_prenorm', False))
+        # z-norm SAU DWT luon ap (z_gran chi quyet dinh shape stats -> _bcast).
+        # Pre-norm (neu co) da duoc nuong vao X_*.npy o build; day la tang z duy nhat.
 
     def __len__(self):  return len(self.y)
 
     def __getitem__(self, idx):
         xh = np.array(self.XH[idx], dtype=np.float32)                     # copy -> writable
         xv = np.array(self.XV[idx], dtype=np.float32)
-        if not self._skip_z:
-            xh = (xh - self.xh_mean) / self.xh_std        # mean/std da broadcast (1,M)|(T2,M)
-            xv = (xv - self.xv_mean) / self.xv_std
+        xh = (xh - self.xh_mean) / self.xh_std        # mean/std da broadcast (1,M)|(T2,M)
+        xv = (xv - self.xv_mean) / self.xv_std
         # Canonical order: stream_T = HL content, stream_F = LH content.
         st, sf = (xh, xv) if self._hl_is_xh else (xv, xh)
         return torch.from_numpy(st), torch.from_numpy(sf), int(self.y[idx])
@@ -192,27 +189,25 @@ class PreprocTFMambaHaarAsWavDataset(Dataset):
 class PreprocWavMambaDataset(Dataset):
     """Loads wavmamba/X_{split}.npy, applies per-channel z-score. Returns (X, label)."""
 
-    def __init__(self, bench_dir: Path, split: str, stats: dict, norm_mode: str = 'double'):
+    def __init__(self, bench_dir: Path, split: str, stats: dict):
         bench_dir = Path(bench_dir)
         self.X   = np.load(bench_dir / 'wavmamba' / f'X_{split}.npy', mmap_mode='r')
         self.y   = np.load(bench_dir / f'y_{split}.npy')
         s = stats['wavmamba']
-        # Stats (C,F2) per-channel-bin [XRF55] hoac (C,T2,F2) per-position [multi-dataset].
+        # Stats (C,F2) per-channel-bin [z_gran=pcb] hoac (C,T2,F2) per-position [z_gran=perpos].
         # Dua ve dang broadcast voi (C,T2,F2): (C,F2)->(C,1,F2); (C,T2,F2) giu nguyen.
         def _bcast(a):
             a = np.array(a, dtype=np.float32)
             return a[:, None, :] if a.ndim == 2 else a
         self.mu = _bcast(s['mean']); self.sig = _bcast(s['std'])
-        # author: bo z-norm khi build co SenseFi pre-norm (uthar/ntufi); xem TFMamba ds.
-        self._skip_z = (norm_mode == 'author'
-                        and stats.get('meta', {}).get('sensefi_prenorm', False))
+        # z-norm SAU DWT luon ap (z_gran chi quyet dinh shape stats -> _bcast).
+        # Pre-norm (neu co) da duoc nuong vao X_*.npy o build; day la tang z duy nhat.
 
     def __len__(self):  return len(self.y)
 
     def __getitem__(self, idx):
         x = np.array(self.X[idx], dtype=np.float32)                 # copy -> writable
-        if not self._skip_z:
-            x = (x - self.mu) / self.sig          # mu/sig da broadcast (C,1,F2)|(C,T2,F2)
+        x = (x - self.mu) / self.sig          # mu/sig da broadcast (C,1,F2)|(C,T2,F2)
         return torch.from_numpy(x), int(self.y[idx])
 
 
@@ -326,17 +321,17 @@ _PREPROC_SENTINEL = {
 
 
 def build_loaders(model_name: str, stats: dict, bench_dir,
-                  batch_size: int = 32, num_workers: int = 4,
-                  norm_mode: str = 'double'):
+                  batch_size: int = 32, num_workers: int = 4):
     """Build (train_loader, test_loader) from pre-built bench arrays.
 
     Args:
         model_name : 'resnet', 'tfmamba', 'wavdualmamba', or 'wavdualmamba_haar'
         stats      : dict from load_stats(bench_dir)
-        bench_dir  : path to bench/raw_nosc/ or bench/processed_nosc/
-        norm_mode  : 'double' (mac dinh, z-norm luon — giu hanh vi cu) | 'author'
-                     (bo z-norm cho build co SenseFi pre-norm = UT-HAR/NTU-Fi).
-                     Chi tfmamba & wavdualmamba ho tro; cac ds khac bo qua.
+        bench_dir  : path to bench/<mode>_<prenorm>_<z_gran>/ (multi) or bench/<mode>/ (XRF55)
+
+    z-norm SAU DWT luon ap; granularity (perpos/pcb) tu shape stats trong stats.json
+    (xu ly boi _bcast trong moi Dataset class). Pre-norm (neu co) da nuong vao X_*.npy
+    o build; day la tang z duy nhat.
     """
     if model_name not in _PREPROC_DS:
         raise ValueError(f"Unknown model '{model_name}'. Choose from: {list(_PREPROC_DS)}")
@@ -355,10 +350,8 @@ def build_loaders(model_name: str, stats: dict, bench_dir,
 
     DS = _PREPROC_DS[model_name]
     kw = _kw(num_workers)
-    # norm_mode chi ap dung cho 2 ds co duong z-norm theo SenseFi pre-norm.
-    extra = {'norm_mode': norm_mode} if model_name in ('tfmamba', 'wavdualmamba') else {}
-    train_ds = DS(bench_dir, 'train', stats, **extra)
-    test_ds  = DS(bench_dir, 'test',  stats, **extra)
+    train_ds = DS(bench_dir, 'train', stats)
+    test_ds  = DS(bench_dir, 'test',  stats)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  **kw)
     test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, **kw)
     return train_loader, test_loader

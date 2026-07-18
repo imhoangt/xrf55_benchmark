@@ -60,13 +60,15 @@ cells.append(md(
     "**Chia dataset (giống git họ):** HUST random 80/20 (seed 42); UT-HAR official "
     "train=X_train / test=X_test (val KHÔNG dùng; `MERGE_VAL=True` để gộp val vào test); "
     "NTU-Fi train_amp/test_amp. "
-    "**Chuẩn hoá theo `NORM_MODE`:** HUST luôn `data_norm` (z per-position); UT-HAR/NTU-Fi "
-    "dùng norm **SenseFi** (min-max / hằng-số) trên raw trước DWT — `author` (đúng tác giả, "
-    "không z lại) hoặc `double` (SenseFi + z). Cần **build lại** UT-HAR/NTU-Fi để áp SenseFi pre-norm.",
+    "**Chuẩn hoá 2 tầng, 2 cờ trực giao `PRENORM` × `Z_GRAN`:** "
+    "`PRENORM='sensefi'` áp pre-norm raw (UT-HAR min-max / NTU-Fi (x−42.32)/4.98; HUST=none) hoặc "
+    "`'none'` (KHÔNG, giong XRF55). `Z_GRAN='perpos'` = z per-position (C,T2,F2) (TF-Mamba) hoặc "
+    "`'pcb'` = z per-channel-bin (C,F2) gop thời gian (XRF55). z-norm sau DWT LUÔN áp. "
+    "4 tổ hợp: `sensefi+perpos` (=TF-Mamba) | `none+pcb` (=XRF55) | `sensefi+pcb` (lai) | `none+perpos`.",
     "",
     "**So sánh CÔNG BẰNG giữa các MODEL:** `make_cfg` chỉ phụ thuộc `PROTOCOL` (KHÔNG phụ "
-    "thuộc MODEL); SenseFi pre-norm + split áp ở tầng build (độc lập model); z-norm per-position "
-    "áp cho tất cả. → chạy nhiều lần cùng `PROTOCOL`/`NORM_MODE`/`MERGE_VAL`/`SEEDS`, chỉ đổi `MODEL` "
+    "thuộc MODEL); pre-norm + split áp ở tầng build (độc lập model); z-norm áp cho tất cả. "
+    "→ chạy nhiều lần cùng `PROTOCOL`/`PRENORM`/`Z_GRAN`/`MERGE_VAL`/`SEEDS`, chỉ đổi `MODEL` "
     "(`tfmamba` / `s4.nogn` / `s4.nogn_gate`) = **protocol + chia dataset + chuẩn hoá GIỐNG HỆT**, "
     "khác duy nhất là **kiến trúc model** (giữa hai s4 chỉ khác `fusion` convex↔gate). "
     "Mỗi run lưu thư mục riêng theo `MODEL`+`RUN_TAG` nên không ghi đè.",
@@ -109,7 +111,8 @@ cells.append(code(
     "",
     "MODEL    = 's4.nogn'   # 'tfmamba' (gốc) | 's4.nogn' (S4 bỏ stem GroupNorm) | 's4.nogn_gate' (S4.nogn + fusion gate per-channel)",
     "PROTOCOL = 'theirs'    # 'theirs' (TF-Mamba paper) | 'mine' (02*)",
-    "NORM_MODE = 'double'   # 'author' (UT-HAR/NTU-Fi dùng norm SenseFi, đúng tác giả) | 'double' (+ z-norm)",
+    "PRENORM  = 'sensefi'   # 'sensefi' = UT-HAR min-max / NTU-Fi (x-42.32)/4.98 (HUST=none) | 'none' = KHÔNG pre-norm (giong XRF55)",
+    "Z_GRAN   = 'perpos'    # 'perpos' = z per-position (C,T2,F2) (TF-Mamba) | 'pcb' = z per-channel-bin (C,F2) gop thoi gian (XRF55)",
     "MERGE_VAL = True       # CHI UT-HAR: False=git SenseFi (test=X_test) | True=gộp val vào test",
     "MINE_EARLY_STOP = None # 'mine': mặc định TẮT early-stop. Đặt số (vd 0.01) để bật. 'theirs' cố định 0.01 (tác giả)",
     "WARMUP_EPOCHS = 5      # 'mine': số epoch warmup cho warmup_cosine. 'theirs' không scheduler nên không dùng",
@@ -121,9 +124,10 @@ cells.append(code(
     "DIRMAP  = {'hust': 'HUST-HAR', 'uthar': 'UT_HAR', 'ntufi': 'NTU-Fi_HAR'}",
     "_MARKER = {'hust': 'HUST_HAR_labels.pt', 'uthar': 'X_train.csv', 'ntufi': 'train_amp'}",
     "assert MODEL in ('tfmamba', 's4.nogn', 's4.nogn_gate'), f'MODEL khong hop le: {MODEL!r}'",
+    "assert PRENORM in ('none','sensefi') and Z_GRAN in ('perpos','pcb'), 'PRENORM/Z_GRAN khong hop le'",
     "FORMAT  = 'tfmamba' if MODEL == 'tfmamba' else 'wavmamba'   # build layout per model",
     "WAV_SUBS = 'HL,LH'   # ca s4.nogn lan s4.nogn_gate deu Haar 2 bang {HL,LH} (no LL); chi dung khi FORMAT=wavmamba",
-    "RUN_TAG = f'{PROTOCOL}_{NORM_MODE}' + ('_mv' if MERGE_VAL else '')   # phan biet run, tranh ghi de",
+    "RUN_TAG = f'{PROTOCOL}_{PRENORM}_{Z_GRAN}' + ('_mv' if MERGE_VAL else '')   # phan biet run, tranh ghi de",
     "build_py = CODE_PATH / 'xrf55_bench' / 'scripts' / '10_build_multi.py'",
     "",
     "def resolve_mount(ds):",
@@ -133,7 +137,7 @@ cells.append(code(
     "            return str(c)",
     "    raise FileNotFoundError(f'Không thấy /kaggle/input/* chứa {_MARKER[ds]} cho {ds}')",
     "",
-    "print(f'MODEL={MODEL}  PROTOCOL={PROTOCOL}  NORM_MODE={NORM_MODE}  MERGE_VAL={MERGE_VAL}  FORMAT={FORMAT}')",
+    "print(f'MODEL={MODEL}  PROTOCOL={PROTOCOL}  PRENORM={PRENORM}  Z_GRAN={Z_GRAN}  MERGE_VAL={MERGE_VAL}  FORMAT={FORMAT}')",
     "print(f'DATASETS={DATASETS}  MODES={MODES}  SEEDS={SEEDS}  RUN_TAG={RUN_TAG}')",
     "for ds in DATASETS:",
     "    try:    print(f'  {ds:6s} mount: {resolve_mount(ds)}')",
@@ -205,19 +209,20 @@ cells.append(code(
     "",
     "def run_one(ds, md):",
     "    raw   = resolve_mount(ds)",
-    "    bench = Path(OUT_ROOT) / DIRMAP[ds] / 'bench' / md",
+    "    md_sub = f'{md}_{PRENORM}_{Z_GRAN}'   # khop bench dir o build script (4 to hop khong de)",
+    "    bench = Path(OUT_ROOT) / DIRMAP[ds] / 'bench' / md_sub",
     "    out   = Path(f'{OUT_ROOT}/outputs/{MODEL}_{ds}_{md}_{RUN_TAG}')",
     "    cmd = [sys.executable, str(build_py), '--dataset', ds, '--mode', md,",
     "           '--raw-root', raw, '--out-root', OUT_ROOT, '--format', FORMAT]",
     "    if FORMAT == 'wavmamba': cmd += ['--wav-subbands', WAV_SUBS]   # s4.nogn* -> 'HL,LH'",
     "    if MERGE_VAL: cmd.append('--merge-val')",
+    "    cmd += ['--prenorm', PRENORM, '--z-gran', Z_GRAN]   # 2 co truc giao",
     "    subprocess.run(cmd, check=True)",
     "    meta = json.load(open(bench / 'stats.json'))['meta']",
     "    mname, mk = model_setup(meta)",
     "    run(model_name=mname, bench_dir=bench, output_dir=out, train_cfg=make_cfg(),",
     "        num_workers=4, model_kwargs=mk, num_classes=meta['classes'],",
-    "        class_names=meta['class_names'], dataset_name=ds, split_desc=meta['split'],",
-    "        norm_mode=NORM_MODE)",
+    "        class_names=meta['class_names'], dataset_name=ds, split_desc=meta['split'])",
     "",
     "results = {}",
     "for ds in DATASETS:",
